@@ -545,9 +545,14 @@ struct cfs_rq {
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
 	struct sched_entity	*curr;
+#ifdef CONFIG_BS_SCHED
+	struct bs_node		*head;
+	struct bs_node		*cursor;
+#else
 	struct sched_entity	*next;
 	struct sched_entity	*last;
 	struct sched_entity	*skip;
+#endif /** CONFIG_BS_SCHED */
 
 #ifdef	CONFIG_SCHED_DEBUG
 	unsigned int		nr_spread_over;

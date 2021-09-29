@@ -8995,6 +8995,10 @@ void __init sched_init(void)
 
 	wait_bit_init();
 
+#ifdef CONFIG_BS_SCHED
+	printk(KERN_INFO "BS CPU scheduler v5.14 by Hamad Al Marri.");
+#endif
+
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	ptr += 2 * nr_cpu_ids * sizeof(void **);
 #endif
