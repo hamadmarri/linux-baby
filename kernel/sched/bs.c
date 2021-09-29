@@ -117,6 +117,19 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 static void update_curr(struct cfs_rq *cfs_rq)
 {
+	struct sched_entity *curr = cfs_rq->curr;
+	u64 now = rq_clock_task(rq_of(cfs_rq));
+	u64 delta_exec;
+
+	if (unlikely(!curr))
+		return;
+
+	delta_exec = now - curr->exec_start;
+	if (unlikely((s64)delta_exec <= 0))
+		return;
+
+	curr->exec_start = now;
+	curr->sum_exec_runtime += delta_exec;
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -257,10 +270,33 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 static void yield_task_fair(struct rq *rq)
 {
+	struct task_struct *curr = rq->curr;
+	struct cfs_rq *cfs_rq = task_cfs_rq(curr);
+
+	/*
+	 * Are we the only task in the tree?
+	 */
+	if (unlikely(rq->nr_running == 1))
+		return;
+
+	if (curr->policy != SCHED_BATCH) {
+		update_rq_clock(rq);
+		/*
+		 * Update run-time statistics of the 'current'.
+		 */
+		update_curr(cfs_rq);
+		/*
+		 * Tell update_rq_clock() that we've just updated,
+		 * so we don't do microscopic update in schedule()
+		 * and double the fastpath cost.
+		 */
+		rq_clock_skip_update(rq);
+	}
 }
 
 static bool yield_to_task_fair(struct rq *rq, struct task_struct *p)
 {
+	yield_task_fair(rq);
 	return true;
 }
 
@@ -287,6 +323,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (unlikely(p->policy != SCHED_NORMAL) || !sched_feat(WAKEUP_PREEMPTION))
 		return;
 
+	update_curr(cfs_rq_of(se));
 	return;
 
 preempt:
@@ -299,7 +336,9 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	if (se->on_rq)
 		__dequeue_entity(cfs_rq, se);
 
+	se->exec_start = rq_clock_task(rq_of(cfs_rq));
 	cfs_rq->curr = se;
+	se->prev_sum_exec_runtime = se->sum_exec_runtime;
 }
 
 static struct sched_entity *
