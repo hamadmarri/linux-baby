@@ -319,7 +319,6 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		return;
 
 	update_curr(cfs_rq_of(se));
-	return;
 
 preempt:
 	resched_curr(rq);
