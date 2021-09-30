@@ -694,7 +694,60 @@ out:
 	return pulled_task;
 }
 
-void trigger_load_balance(struct rq *rq) {}
+static inline int on_null_domain(struct rq *rq)
+{
+	return unlikely(!rcu_dereference_sched(rq->sd));
+}
+
+void trigger_load_balance(struct rq *this_rq)
+{
+	int this_cpu = cpu_of(this_rq);
+	int cpu;
+	unsigned int max, min;
+	struct rq *max_rq, *min_rq, *c_rq;
+	struct rq_flags src_rf;
+
+	if (this_cpu != 0)
+		return;
+
+	max = min = this_rq->nr_running;
+	max_rq = min_rq = this_rq;
+
+	for_each_online_cpu(cpu) {
+		c_rq = cpu_rq(cpu);
+
+		/*
+		 * Don't need to rebalance while attached to NULL domain or
+		 * runqueue CPU is not active
+		 */
+		if (unlikely(on_null_domain(c_rq) || !cpu_active(cpu)))
+			continue;
+
+		if (c_rq->nr_running < min) {
+			min = c_rq->nr_running;
+			min_rq = c_rq;
+		}
+
+		if (c_rq->nr_running > max) {
+			max = c_rq->nr_running;
+			max_rq = c_rq;
+		}
+	}
+
+	if (min_rq == max_rq || max - min < 2)
+		return;
+
+	rq_lock_irqsave(max_rq, &src_rf);
+	update_rq_clock(max_rq);
+
+	if (max_rq->nr_running < 2) {
+		rq_unlock(max_rq, &src_rf);
+		local_irq_restore(src_rf.flags);
+		return;
+	}
+
+	move_task(min_rq, max_rq, &src_rf);
+}
 
 void update_group_capacity(struct sched_domain *sd, int cpu) {}
 #endif /* CONFIG_SMP */
