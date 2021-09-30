@@ -23,6 +23,7 @@ void __init sched_init_granularity(void) {}
 void init_entity_runnable_average(struct sched_entity *se) {}
 void post_init_entity_util_avg(struct task_struct *p) {}
 void update_max_interval(void) {}
+static int newidle_balance(struct rq *this_rq, struct rq_flags *rf);
 #endif /** CONFIG_SMP */
 
 void init_cfs_rq(struct cfs_rq *cfs_rq)
@@ -144,31 +145,19 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 	bsn->next = bsn->prev = NULL;
 
-	//printk("********* A __enqueue_entity");
-
 	// if empty
 	if (!cfs_rq->head) {
-		//printk("********* B __enqueue_entity");
-		
 		cfs_rq->head	= bsn;
 		cfs_rq->cursor	= bsn;
 	}
 	// if cursor == head
 	else if (cfs_rq->cursor == cfs_rq->head) {
-		//printk("********* C __enqueue_entity");
-		
 		bsn->next = cfs_rq->head;
 		cfs_rq->head->prev   = bsn;
-		cfs_rq->cursor->prev = bsn;
 		cfs_rq->head         = bsn;
 	}
 	// if cursor != head
 	else {
-		//printk("********* D __enqueue_entity");
-		
-		BUG_ON(!cfs_rq->cursor);
-		BUG_ON(!cfs_rq->cursor->prev);
-		
 		prev = cfs_rq->cursor->prev;
 
 		bsn->next = cfs_rq->cursor;
@@ -177,8 +166,14 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		prev->next = bsn;
 		bsn->prev  = prev;
 	}
-	
-	//printk("********* E __enqueue_entity");
+}
+
+static void rotate_cursor(struct cfs_rq *cfs_rq)
+{
+	cfs_rq->cursor = cfs_rq->cursor->next;
+
+	if (!cfs_rq->cursor)
+		cfs_rq->cursor = cfs_rq->head;
 }
 
 static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -196,11 +191,11 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		cfs_rq->head->prev	= NULL;
 
 		if (bsn == cfs_rq->cursor)
-			cfs_rq->cursor = cfs_rq->cursor->next;
+			rotate_cursor(cfs_rq);
 	} else {
 		// if in the middle
 		if (bsn == cfs_rq->cursor)
-			cfs_rq->cursor = cfs_rq->cursor->prev;
+			rotate_cursor(cfs_rq);
 
 		prev = bsn->prev;
 		next = bsn->next;
@@ -344,12 +339,13 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	struct bs_node *bsn;
-
-	bsn = cfs_rq->cursor = cfs_rq->cursor->next;
+	struct bs_node *bsn = cfs_rq->cursor;
 
 	if (!bsn)
 		bsn = cfs_rq->cursor = cfs_rq->head;
+
+	// update cursor
+	rotate_cursor(cfs_rq);
 
 	return se_of(bsn);
 }
@@ -360,9 +356,9 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	struct sched_entity *se;
 	struct task_struct *p;
-	//int new_tasks;
+	int new_tasks;
 
-//again:
+again:
 	if (!sched_fair_runnable(rq))
 		goto idle;
 
@@ -390,18 +386,18 @@ idle:
 	if (!rf)
 		return NULL;
 
-	//new_tasks = newidle_balance(rq, rf);
+	new_tasks = newidle_balance(rq, rf);
 
 	/*
 	 * Because newidle_balance() releases (and re-acquires) rq->lock, it is
 	 * possible for any higher priority task to appear. In that case we
 	 * must re-start the pick_next_entity() loop.
 	 */
-	//if (new_tasks < 0)
+	if (new_tasks < 0)
 		return RETRY_TASK;
 
-	//if (new_tasks > 0)
-		//goto again;
+	if (new_tasks > 0)
+		goto again;
 
 	/*
 	 * rq is about to be idle, check if we need to update the
@@ -535,7 +531,168 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 
 static void rq_online_fair(struct rq *rq) {}
 static void rq_offline_fair(struct rq *rq) {}
-static void task_dead_fair(struct task_struct *p) {}
+static void task_dead_fair(struct task_struct *p)
+{
+	struct cfs_rq *cfs_rq = cfs_rq_of(&p->se);
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&cfs_rq->removed.lock, flags);
+	++cfs_rq->removed.nr;
+	raw_spin_unlock_irqrestore(&cfs_rq->removed.lock, flags);
+}
+
+static int
+can_migrate_task(struct task_struct *p, int dst_cpu, struct rq *src_rq)
+{
+	if (task_running(src_rq, p))
+		return 0;
+
+	/* Disregard pcpu kthreads; they are where they need to be. */
+	if (kthread_is_per_cpu(p))
+		return 0;
+
+	if (!cpumask_test_cpu(dst_cpu, p->cpus_ptr))
+		return 0;
+
+	return 1;
+}
+
+static void pull_from(struct rq *this_rq,
+		      struct rq *src_rq,
+		      struct rq_flags *src_rf,
+		      struct task_struct *p)
+{
+	struct rq_flags rf;
+
+	// detach task
+	deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
+	set_task_cpu(p, cpu_of(this_rq));
+
+	// unlock src rq
+	rq_unlock(src_rq, src_rf);
+
+	// lock this rq
+	rq_lock(this_rq, &rf);
+	update_rq_clock(this_rq);
+
+	activate_task(this_rq, p, ENQUEUE_NOCLOCK);
+	check_preempt_curr(this_rq, p, 0);
+
+	// unlock this rq
+	rq_unlock(this_rq, &rf);
+
+	local_irq_restore(src_rf->flags);
+}
+
+static int move_task(struct rq *this_rq, struct rq *src_rq,
+			struct rq_flags *src_rf)
+{
+	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
+	struct task_struct *p;
+	struct bs_node *bsn = src_cfs_rq->head;
+	int moved = 0;
+
+	while (bsn) {
+		p = task_of(se_of(bsn));
+		if (can_migrate_task(p, cpu_of(this_rq), src_rq)) {
+			pull_from(this_rq, src_rq, src_rf, p);
+			moved = 1;
+			break;
+		}
+
+		bsn = bsn->next;
+	}
+
+	if (!moved) {
+		rq_unlock(src_rq, src_rf);
+		local_irq_restore(src_rf->flags);
+	}
+
+	return moved;
+}
+
+static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
+{
+	int this_cpu = this_rq->cpu;
+	struct rq *src_rq;
+	int src_cpu = -1, cpu;
+	int pulled_task = 0;
+	unsigned int max = 0;
+	struct rq_flags src_rf;
+
+	/*
+	 * We must set idle_stamp _before_ calling idle_balance(), such that we
+	 * measure the duration of idle_balance() as idle time.
+	 */
+	this_rq->idle_stamp = rq_clock(this_rq);
+
+	/*
+	 * Do not pull tasks towards !active CPUs...
+	 */
+	if (!cpu_active(this_cpu))
+		return 0;
+
+	rq_unpin_lock(this_rq, rf);
+	raw_spin_unlock(&this_rq->__lock);
+
+	for_each_online_cpu(cpu) {
+		/*
+		 * Stop searching for tasks to pull if there are
+		 * now runnable tasks on this rq.
+		 */
+		if (this_rq->nr_running > 0)
+			goto out;
+
+		if (cpu == this_cpu)
+			continue;
+
+		src_rq = cpu_rq(cpu);
+
+		if (src_rq->nr_running < 2)
+			continue;
+
+		if (src_rq->nr_running > max) {
+			max = src_rq->nr_running;
+			src_cpu = cpu;
+		}
+	}
+
+	if (src_cpu != -1) {
+		src_rq = cpu_rq(src_cpu);
+
+		rq_lock_irqsave(src_rq, &src_rf);
+		update_rq_clock(src_rq);
+
+		if (src_rq->nr_running < 2) {
+			rq_unlock(src_rq, &src_rf);
+			local_irq_restore(src_rf.flags);
+		} else {
+			pulled_task = move_task(this_rq, src_rq, &src_rf);
+		}
+	}
+
+out:
+	raw_spin_lock(&this_rq->__lock);
+
+	/*
+	 * While browsing the domains, we released the rq lock, a task could
+	 * have been enqueued in the meantime. Since we're not going idle,
+	 * pretend we pulled a task.
+	 */
+	if (this_rq->cfs.h_nr_running && !pulled_task)
+		pulled_task = 1;
+
+	/* Is there a task of a high priority class? */
+	if (this_rq->nr_running != this_rq->cfs.h_nr_running)
+		pulled_task = -1;
+
+	if (pulled_task)
+		this_rq->idle_stamp = 0;
+
+	rq_repin_lock(this_rq, rf);
+
+	return pulled_task;
+}
 
 void trigger_load_balance(struct rq *rq) {}
 
