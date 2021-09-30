@@ -20,10 +20,10 @@ static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 	s64 prio_diff;
 	s64 factor = race_time / HZ_PERIOD;
 
-	if (PRIO_TO_NICE(p->static_prio) == 0)
+	if (PRIO_TO_NICE(p->prio) == 0)
 		return delta;
 
-	prio_diff = PRIO_TO_NICE(p->static_prio) * 1000000;
+	prio_diff = PRIO_TO_NICE(p->prio) * 1000000;
 	prio_diff /= factor;
 
 	if ( (s64)(delta + prio_diff) < 0)
@@ -401,6 +401,12 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	 * is driven by the tick):
 	 */
 	if (unlikely(p->policy != SCHED_NORMAL) || !sched_feat(WAKEUP_PREEMPTION))
+		return;
+
+	/*
+	 * Lower priority tasks do not preempt higher ones
+	 */
+	if (p->prio > curr->prio)
 		return;
 
 	update_curr(cfs_rq_of(se));
