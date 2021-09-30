@@ -7,113 +7,29 @@
 #include "sched.h"
 #include "fair_numa.h"
 #include "pelt.h"
+#include "bs.h"
 
-/*
- * After fork, child runs first. If set to 0 (default) then
- * parent will (try to) run first.
- */
-unsigned int sysctl_sched_child_runs_first __read_mostly;
+unsigned int __read_mostly race_time = 40000000;
+#define HZ_PERIOD (1000000000 / HZ)
+//#define RACE_TIME 40000000
+//#define FACTOR (RACE_TIME / HZ_PERIOD)
 
-const_debug unsigned int sysctl_sched_migration_cost	= 500000UL;
-
-void __init sched_init_granularity(void) {}
-
-#ifdef CONFIG_SMP
-/* Give new sched_entity start runnable values to heavy its load in infant time */
-void init_entity_runnable_average(struct sched_entity *se) {}
-void post_init_entity_util_avg(struct task_struct *p) {}
-void update_max_interval(void) {}
-static int newidle_balance(struct rq *this_rq, struct rq_flags *rf);
-#endif /** CONFIG_SMP */
-
-void init_cfs_rq(struct cfs_rq *cfs_rq)
+static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 {
-	cfs_rq->tasks_timeline = RB_ROOT_CACHED;
-#ifdef CONFIG_SMP
-	raw_spin_lock_init(&cfs_rq->removed.lock);
-#endif
-}
+	struct task_struct *p = task_of(se);
+	s64 prio_diff;
+	s64 factor = race_time / HZ_PERIOD;
 
-__init void init_sched_fair_class(void) {}
+	if (PRIO_TO_NICE(p->static_prio) == 0)
+		return delta;
 
-void reweight_task(struct task_struct *p, int prio) {}
+	prio_diff = PRIO_TO_NICE(p->static_prio) * 1000000;
+	prio_diff /= factor;
 
-static inline struct sched_entity *se_of(struct bs_node *bsn)
-{
-	return container_of(bsn, struct sched_entity, bs_node);
-}
+	if ( (s64)(delta + prio_diff) < 0)
+		return 1;
 
-#ifdef CONFIG_SCHED_SMT
-DEFINE_STATIC_KEY_FALSE(sched_smt_present);
-EXPORT_SYMBOL_GPL(sched_smt_present);
-
-static inline void set_idle_cores(int cpu, int val)
-{
-	struct sched_domain_shared *sds;
-
-	sds = rcu_dereference(per_cpu(sd_llc_shared, cpu));
-	if (sds)
-		WRITE_ONCE(sds->has_idle_cores, val);
-}
-
-static inline bool test_idle_cores(int cpu, bool def)
-{
-	struct sched_domain_shared *sds;
-
-	sds = rcu_dereference(per_cpu(sd_llc_shared, cpu));
-	if (sds)
-		return READ_ONCE(sds->has_idle_cores);
-
-	return def;
-}
-
-void __update_idle_core(struct rq *rq)
-{
-	int core = cpu_of(rq);
-	int cpu;
-
-	rcu_read_lock();
-	if (test_idle_cores(core, true))
-		goto unlock;
-
-	for_each_cpu(cpu, cpu_smt_mask(core)) {
-		if (cpu == core)
-			continue;
-
-		if (!available_idle_cpu(cpu))
-			goto unlock;
-	}
-
-	set_idle_cores(core, 1);
-unlock:
-	rcu_read_unlock();
-}
-#endif
-
-static void
-account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se)
-{
-#ifdef CONFIG_SMP
-	if (entity_is_task(se)) {
-		struct rq *rq = rq_of(cfs_rq);
-
-		account_numa_enqueue(rq, task_of(se));
-		list_add(&se->group_node, &rq->cfs_tasks);
-	}
-#endif
-	cfs_rq->nr_running++;
-}
-
-static void
-account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
-{
-#ifdef CONFIG_SMP
-	if (entity_is_task(se)) {
-		account_numa_dequeue(rq_of(cfs_rq), task_of(se));
-		list_del_init(&se->group_node);
-	}
-#endif
-	cfs_rq->nr_running--;
+	return delta + prio_diff;
 }
 
 static void update_curr(struct cfs_rq *cfs_rq)
@@ -131,6 +47,9 @@ static void update_curr(struct cfs_rq *cfs_rq)
 
 	curr->exec_start = now;
 	curr->sum_exec_runtime += delta_exec;
+
+	curr->bs_node.vruntime += convert_to_vruntime(delta_exec, curr);
+	cfs_rq->min_vruntime = curr->bs_node.vruntime;
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -141,39 +60,18 @@ static void update_curr_fair(struct rq *rq)
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct bs_node *bsn = &se->bs_node;
-	struct bs_node *prev;
 
 	bsn->next = bsn->prev = NULL;
 
 	// if empty
 	if (!cfs_rq->head) {
 		cfs_rq->head	= bsn;
-		cfs_rq->cursor	= bsn;
 	}
-	// if cursor == head
-	else if (cfs_rq->cursor == cfs_rq->head) {
-		bsn->next = cfs_rq->head;
+	else {
+		bsn->next	     = cfs_rq->head;
 		cfs_rq->head->prev   = bsn;
 		cfs_rq->head         = bsn;
 	}
-	// if cursor != head
-	else {
-		prev = cfs_rq->cursor->prev;
-
-		bsn->next = cfs_rq->cursor;
-		cfs_rq->cursor->prev = bsn;
-
-		prev->next = bsn;
-		bsn->prev  = prev;
-	}
-}
-
-static void rotate_cursor(struct cfs_rq *cfs_rq)
-{
-	cfs_rq->cursor = cfs_rq->cursor->next;
-
-	if (!cfs_rq->cursor)
-		cfs_rq->cursor = cfs_rq->head;
 }
 
 static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -183,20 +81,15 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 	// if only one se in rq
 	if (cfs_rq->head->next == NULL) {
-		cfs_rq->head	= NULL;
-		cfs_rq->cursor	= NULL;
-	} else if (bsn == cfs_rq->head) {
-		// if it is the head
-		cfs_rq->head		= cfs_rq->head->next;
-		cfs_rq->head->prev	= NULL;
-
-		if (bsn == cfs_rq->cursor)
-			rotate_cursor(cfs_rq);
-	} else {
-		// if in the middle
-		if (bsn == cfs_rq->cursor)
-			rotate_cursor(cfs_rq);
-
+		cfs_rq->head = NULL;
+	}
+	// if it is the head
+	else if (bsn == cfs_rq->head) {
+		cfs_rq->head	   = cfs_rq->head->next;
+		cfs_rq->head->prev = NULL;
+	}
+	// if in the middle
+	else {
 		prev = bsn->prev;
 		next = bsn->next;
 
@@ -210,8 +103,12 @@ static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	bool curr = cfs_rq->curr == se;
+	bool renorm = (flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
 
 	update_curr(cfs_rq);
+
+	if (renorm)
+		se->bs_node.vruntime = cfs_rq->min_vruntime;
 
 	account_entity_enqueue(cfs_rq, se);
 
@@ -296,56 +193,6 @@ static bool yield_to_task_fair(struct rq *rq, struct task_struct *p)
 }
 
 static void
-check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
-{
-	if (cfs_rq->more == 0)
-		resched_curr(rq_of(cfs_rq));
-}
-
-static void
-entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
-{
-	update_curr(cfs_rq);
-
-	if (cfs_rq->nr_running > 1)
-		check_preempt_tick(cfs_rq, curr);
-
-	cfs_rq->more = 0;
-}
-
-static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
-{
-	struct task_struct *curr = rq->curr;
-	struct sched_entity *se = &curr->se, *pse = &p->se;
-
-	if (unlikely(se == pse))
-		return;
-
-	if (test_tsk_need_resched(curr))
-		return;
-
-	/* Idle tasks are by definition preempted by non-idle tasks. */
-	if (unlikely(task_has_idle_policy(curr)) &&
-	    likely(!task_has_idle_policy(p)))
-		goto preempt;
-
-	/*
-	 * Batch and idle tasks do not preempt non-idle tasks (their preemption
-	 * is driven by the tick):
-	 */
-	if (unlikely(p->policy != SCHED_NORMAL) || !sched_feat(WAKEUP_PREEMPTION))
-		return;
-
-	update_curr(cfs_rq_of(se));
-	check_preempt_tick(cfs_rq_of(se), se);
-
-	return;
-
-preempt:
-	resched_curr(rq);
-}
-
-static void
 set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	if (se->on_rq)
@@ -356,16 +203,34 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
 }
 
+/**
+ * Does a has smaller vruntime than b?
+ */
+static inline bool
+entity_before(struct bs_node *a, struct bs_node *b)
+{
+	return (s64)(a->vruntime - b->vruntime) < 0;
+}
+
 static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	struct bs_node *bsn = cfs_rq->cursor;
+	struct bs_node *bsn = cfs_rq->head;
+	struct bs_node *next;
 
 	if (!bsn)
-		bsn = cfs_rq->cursor = cfs_rq->head;
+		return curr;
 
-	// update cursor
-	rotate_cursor(cfs_rq);
+	next = bsn->next;
+	while (next) {
+		if (entity_before(next, bsn))
+			bsn = next;
+
+		next = next->next;
+	}
+
+	if (curr && entity_before(&curr->bs_node, bsn))
+		return curr;
 
 	return se_of(bsn);
 }
@@ -390,7 +255,7 @@ again:
 
 	p = task_of(se);
 
-	cfs_rq->more = (p->prio < 120) ? 1 : 0;
+	cfs_rq->min_vruntime = se->bs_node.vruntime;
 
 done: __maybe_unused;
 #ifdef CONFIG_SMP
@@ -478,7 +343,6 @@ static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
 {
 	struct sched_entity *se = &prev->se;
 
-	//if (se)
 	put_prev_entity(cfs_rq_of(se), se);
 }
 
@@ -498,6 +362,55 @@ static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 #endif
 
 	set_next_entity(cfs_rq, se);
+}
+
+static void
+check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+{
+	if (pick_next_entity(cfs_rq, curr) != curr)
+		resched_curr(rq_of(cfs_rq));
+}
+
+static void
+entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
+{
+	update_curr(cfs_rq);
+
+	if (cfs_rq->nr_running > 1)
+		check_preempt_tick(cfs_rq, curr);
+}
+
+static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
+{
+	struct task_struct *curr = rq->curr;
+	struct sched_entity *se = &curr->se, *wse = &p->se;
+
+	if (unlikely(se == wse))
+		return;
+
+	if (test_tsk_need_resched(curr))
+		return;
+
+	/* Idle tasks are by definition preempted by non-idle tasks. */
+	if (unlikely(task_has_idle_policy(curr)) &&
+	    likely(!task_has_idle_policy(p)))
+		goto preempt;
+
+	/*
+	 * Batch and idle tasks do not preempt non-idle tasks (their preemption
+	 * is driven by the tick):
+	 */
+	if (unlikely(p->policy != SCHED_NORMAL) || !sched_feat(WAKEUP_PREEMPTION))
+		return;
+
+	update_curr(cfs_rq_of(se));
+	//if (entity_before(&wse->bs_node, &se->bs_node))
+		//goto preempt;
+
+	//return;
+
+preempt:
+	resched_curr(rq);
 }
 
 #ifdef CONFIG_SMP
