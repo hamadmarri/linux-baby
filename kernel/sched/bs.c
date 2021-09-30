@@ -504,14 +504,28 @@ balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	if (rq->nr_running)
 		return 1;
 
-	//return newidle_balance(rq, rf) != 0;
-	return 1;
+	return newidle_balance(rq, rf) != 0;
 }
 
 static int
 select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 {
-	return prev_cpu;
+	struct rq *rq = cpu_rq(prev_cpu);
+	unsigned int min_this = rq->nr_running;
+	unsigned int min = rq->nr_running;
+	int cpu, new_cpu = prev_cpu;
+
+	for_each_online_cpu(cpu) {
+		if (cpu_rq(cpu)->nr_running < min) {
+			new_cpu = cpu;
+			min = cpu_rq(cpu)->nr_running;
+		}
+	}
+
+	if (min == min_this)
+		return prev_cpu;
+
+	return new_cpu;
 }
 
 static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
