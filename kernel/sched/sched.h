@@ -548,6 +548,7 @@ struct cfs_rq {
 #ifdef CONFIG_BS_SCHED
 	struct bs_node		*head;
 	struct bs_node		*cursor;
+	int			more;
 #else
 	struct sched_entity	*next;
 	struct sched_entity	*last;

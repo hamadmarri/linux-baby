@@ -295,6 +295,24 @@ static bool yield_to_task_fair(struct rq *rq, struct task_struct *p)
 	return true;
 }
 
+static void
+check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+{
+	if (cfs_rq->more == 0)
+		resched_curr(rq_of(cfs_rq));
+}
+
+static void
+entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
+{
+	update_curr(cfs_rq);
+
+	if (cfs_rq->nr_running > 1)
+		check_preempt_tick(cfs_rq, curr);
+
+	cfs_rq->more = 0;
+}
+
 static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 {
 	struct task_struct *curr = rq->curr;
@@ -319,6 +337,9 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		return;
 
 	update_curr(cfs_rq_of(se));
+	check_preempt_tick(cfs_rq_of(se), se);
+
+	return;
 
 preempt:
 	resched_curr(rq);
@@ -368,6 +389,8 @@ again:
 	set_next_entity(cfs_rq, se);
 
 	p = task_of(se);
+
+	cfs_rq->more = (p->prio < 120) ? 1 : 0;
 
 done: __maybe_unused;
 #ifdef CONFIG_SMP
@@ -475,21 +498,6 @@ static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 #endif
 
 	set_next_entity(cfs_rq, se);
-}
-
-static void
-check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
-{
-	resched_curr(rq_of(cfs_rq));
-}
-
-static void
-entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
-{
-	update_curr(cfs_rq);
-
-	if (cfs_rq->nr_running > 1)
-		check_preempt_tick(cfs_rq, curr);
 }
 
 #ifdef CONFIG_SMP
