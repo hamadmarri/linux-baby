@@ -106,8 +106,12 @@ config THREAD_INFO_IN_TASK
 	  and put_task_stack() in save_thread_stack_tsk() and get_wchan().
 
 config BS_SCHED
-	bool "Basic Scheduler"
+	bool "Baby Scheduler"
 	default y
+	help
+	  It is a Round Robin (RR) version of Baby Scheduler. It is even simpler
+	  than normal Baby Scheduler where no usage of vruntime and no tasks
+	  priority considerations. It is just a basic RR.
 
 menu "General setup"
 
