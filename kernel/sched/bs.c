@@ -168,7 +168,7 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	}
 }
 
-static void rotate_cursor(struct cfs_rq *cfs_rq)
+static inline void rotate_cursor(struct cfs_rq *cfs_rq)
 {
 	cfs_rq->cursor = cfs_rq->cursor->next;
 
@@ -212,7 +212,6 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	bool curr = cfs_rq->curr == se;
 
 	update_curr(cfs_rq);
-
 	account_entity_enqueue(cfs_rq, se);
 
 	if (!curr)
@@ -455,7 +454,6 @@ static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
 {
 	struct sched_entity *se = &prev->se;
 
-	//if (se)
 	put_prev_entity(cfs_rq_of(se), se);
 }
 
