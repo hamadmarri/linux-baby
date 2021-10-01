@@ -9,24 +9,22 @@
 #include "pelt.h"
 #include "bs.h"
 
-unsigned int __read_mostly race_time = 40000000;
 #define HZ_PERIOD (1000000000 / HZ)
-//#define RACE_TIME 40000000
-//#define FACTOR (RACE_TIME / HZ_PERIOD)
+#define RACE_TIME 40000000
+#define FACTOR (RACE_TIME / HZ_PERIOD)
 
 static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 {
 	struct task_struct *p = task_of(se);
 	s64 prio_diff;
-	s64 factor = race_time / HZ_PERIOD;
 
 	if (PRIO_TO_NICE(p->prio) == 0)
 		return delta;
 
 	prio_diff = PRIO_TO_NICE(p->prio) * 1000000;
-	prio_diff /= factor;
+	prio_diff /= FACTOR;
 
-	if ( (s64)(delta + prio_diff) < 0)
+	if ((s64)(delta + prio_diff) < 0)
 		return 1;
 
 	return delta + prio_diff;
