@@ -13,6 +13,9 @@
 #define RACE_TIME 40000000
 #define FACTOR (RACE_TIME / HZ_PERIOD)
 
+#define YIELD_MARK(bsn)		((bsn)->vruntime |= 0x8000000000000000ULL)
+#define YIELD_UNMARK(bsn)	((bsn)->vruntime &= 0x7FFFFFFFFFFFFFFFULL)
+
 static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 {
 	struct task_struct *p = task_of(se);
@@ -177,6 +180,8 @@ static void yield_task_fair(struct rq *rq)
 	struct task_struct *curr = rq->curr;
 	struct cfs_rq *cfs_rq = task_cfs_rq(curr);
 
+	YIELD_MARK(&curr->se.bs_node);
+
 	/*
 	 * Are we the only task in the tree?
 	 */
@@ -268,6 +273,9 @@ again:
 	p = task_of(se);
 
 	cfs_rq->min_vruntime = se->bs_node.vruntime;
+
+	if (prev)
+		YIELD_UNMARK(&prev->se.bs_node);
 
 done: __maybe_unused;
 #ifdef CONFIG_SMP
