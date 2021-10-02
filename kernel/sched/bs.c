@@ -501,7 +501,11 @@ static void pull_from(struct rq *this_rq,
 	local_irq_restore(src_rf->flags);
 }
 
-#define CACHE_HOTNESS(se, rq) (rq_clock_task(rq) - se->exec_start)
+static inline s64
+cache_coldness(struct sched_entity *se, struct rq *rq)
+{
+	return rq_clock_task(rq) - se->exec_start;
+}
 
 static int move_task(struct rq *this_rq, struct rq *src_rq,
 			struct rq_flags *src_rf)
@@ -509,25 +513,31 @@ static int move_task(struct rq *this_rq, struct rq *src_rq,
 	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
 	struct task_struct *p, *to_migrate = NULL;
 	struct bs_node *bsn = src_cfs_rq->head;
-	u64 colder_cache = 0, cache_hotness;
+	bool shared_cache = cpus_share_cache(cpu_of(this_rq), cpu_of(src_rq));
+	s64 coldest = 0, coldness;
 
 	while (bsn) {
 		p = task_of(se_of(bsn));
-		if (can_migrate_task(p, cpu_of(this_rq), src_rq)) {
-			cache_hotness = CACHE_HOTNESS(se_of(bsn), src_rq);
-			//printk("************* %llu", cache_hotness);
 
-			if (cache_hotness > colder_cache) {
-				colder_cache = cache_hotness;
-				to_migrate = p;
-			}
+		if (!can_migrate_task(p, cpu_of(this_rq), src_rq))
+			goto next;
+
+		if (!to_migrate && shared_cache) {
+			to_migrate = p;
+			break;
 		}
 
+		coldness = cache_coldness(&p->se, src_rq);
+		if (coldness > coldest) {
+			to_migrate = p;
+			coldest = coldness;
+		}
+
+next:
 		bsn = bsn->next;
 	}
 
 	if (to_migrate) {
-		//printk("************* COLDEST %llu", colder_cache);
 		pull_from(this_rq, src_rq, src_rf, to_migrate);
 		return 1;
 	} else {
