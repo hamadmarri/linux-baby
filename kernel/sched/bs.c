@@ -107,6 +107,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 * If we're the current task, we must renormalise before calling
 	 * update_curr().
 	 */
+	// should be removed?
 	if (renorm && curr)
 		se->bs_node.vruntime = cfs_rq->min_vruntime;
 
@@ -500,31 +501,41 @@ static void pull_from(struct rq *this_rq,
 	local_irq_restore(src_rf->flags);
 }
 
+#define CACHE_HOTNESS(se, rq) (rq_clock_task(rq) - se->exec_start)
+
 static int move_task(struct rq *this_rq, struct rq *src_rq,
 			struct rq_flags *src_rf)
 {
 	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
-	struct task_struct *p;
+	struct task_struct *p, *to_migrate = NULL;
 	struct bs_node *bsn = src_cfs_rq->head;
-	int moved = 0;
+	u64 colder_cache = 0, cache_hotness;
 
 	while (bsn) {
 		p = task_of(se_of(bsn));
 		if (can_migrate_task(p, cpu_of(this_rq), src_rq)) {
-			pull_from(this_rq, src_rq, src_rf, p);
-			moved = 1;
-			break;
+			cache_hotness = CACHE_HOTNESS(se_of(bsn), src_rq);
+			//printk("************* %llu", cache_hotness);
+
+			if (cache_hotness > colder_cache) {
+				colder_cache = cache_hotness;
+				to_migrate = p;
+			}
 		}
 
 		bsn = bsn->next;
 	}
 
-	if (!moved) {
+	if (to_migrate) {
+		//printk("************* COLDEST %llu", colder_cache);
+		pull_from(this_rq, src_rq, src_rf, to_migrate);
+		return 1;
+	} else {
 		rq_unlock(src_rq, src_rf);
 		local_irq_restore(src_rf->flags);
 	}
 
-	return moved;
+	return 0;
 }
 
 static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
