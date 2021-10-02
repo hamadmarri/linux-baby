@@ -5,8 +5,8 @@
  *  Copyright (C) 2021, Hamad Al Marri <hamad.s.almarri@gmail.com>
  */
 #include "sched.h"
-#include "fair_numa.h"
 #include "pelt.h"
+#include "fair_numa.h"
 #include "bs.h"
 
 static void update_curr(struct cfs_rq *cfs_rq)
