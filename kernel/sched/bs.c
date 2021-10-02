@@ -507,6 +507,10 @@ cache_coldness(struct sched_entity *se, struct rq *rq)
 	return rq_clock_task(rq) - se->exec_start;
 }
 
+/*
+ * If src and dist cpus share the same llc cache, then migrate any task,
+ * if not, then migrate the coldest cache task.
+ */
 static int move_task(struct rq *this_rq, struct rq *src_rq,
 			struct rq_flags *src_rf)
 {
@@ -523,10 +527,12 @@ static int move_task(struct rq *this_rq, struct rq *src_rq,
 			goto next;
 
 		if (!to_migrate && shared_cache) {
+			/* Migrate any task */
 			to_migrate = p;
 			break;
 		}
 
+		/* Otherwise, migrate the coldest cache task */
 		coldness = cache_coldness(&p->se, src_rq);
 		if (coldness > coldest) {
 			to_migrate = p;
