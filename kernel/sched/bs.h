@@ -15,6 +15,24 @@ void init_entity_runnable_average(struct sched_entity *se) {}
 void post_init_entity_util_avg(struct task_struct *p) {}
 void update_max_interval(void) {}
 static int newidle_balance(struct rq *this_rq, struct rq_flags *rf);
+
+static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
+{
+	update_scan_period(p, new_cpu);
+}
+
+static void rq_online_fair(struct rq *rq) {}
+static void rq_offline_fair(struct rq *rq) {}
+static void task_dead_fair(struct task_struct *p)
+{
+	struct cfs_rq *cfs_rq = cfs_rq_of(&p->se);
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&cfs_rq->removed.lock, flags);
+	++cfs_rq->removed.nr;
+	raw_spin_unlock_irqrestore(&cfs_rq->removed.lock, flags);
+}
+
 #endif /** CONFIG_SMP */
 
 void init_cfs_rq(struct cfs_rq *cfs_rq)
@@ -105,4 +123,27 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	}
 #endif
 	cfs_rq->nr_running--;
+}
+
+
+static void
+prio_changed_fair(struct rq *rq, struct task_struct *p, int oldprio) {}
+
+static void switched_from_fair(struct rq *rq, struct task_struct *p) {}
+
+static void switched_to_fair(struct rq *rq, struct task_struct *p)
+{
+	if (task_on_rq_queued(p)) {
+		/*
+		 * We were most likely switched from sched_rt, so
+		 * kick off the schedule if running, otherwise just see
+		 * if we can still preempt the current task.
+		 */
+		resched_curr(rq);
+	}
+}
+
+static unsigned int get_rr_interval_fair(struct rq *rq, struct task_struct *task)
+{
+	return 0;
 }
