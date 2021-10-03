@@ -1965,3 +1965,4 @@ static inline void account_numa_dequeue(struct rq *rq, struct task_struct *p) {}
 static inline void update_scan_period(struct task_struct *p, int new_cpu) {}
 static void task_tick_numa(struct rq *rq, struct task_struct *curr) {}
 #endif /** CONFIG_NUMA_BALANCING */
+
