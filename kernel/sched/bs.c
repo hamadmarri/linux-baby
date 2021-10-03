@@ -9,6 +9,8 @@
 #include "fair_numa.h"
 #include "bs.h"
 
+u64 sched_granularity = 590000ULL;
+
 #define HZ_PERIOD (1000000000 / HZ)
 #define RACE_TIME 40000000
 #define FACTOR (RACE_TIME / HZ_PERIOD)
@@ -57,6 +59,115 @@ static void update_curr_fair(struct rq *rq)
 {
 	update_curr(cfs_rq_of(&rq->curr->se));
 }
+
+/**
+ * Does a has smaller vruntime than b?
+ */
+static inline bool
+entity_before(struct bs_node *a, struct bs_node *b)
+{
+	return (s64)(a->vruntime - b->vruntime) < 0;
+}
+
+static inline s64
+diff_vrt(struct sched_entity *a, struct sched_entity *b)
+{
+	return (s64)(a->bs_node.vruntime - b->bs_node.vruntime);
+}
+
+#ifdef CONFIG_SCHED_HRTICK
+static struct sched_entity *
+pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr);
+
+/*
+ *         cs         g
+ *         |   gran   |
+ *         |<-------->|
+ *  |n1    |      |n2 |  |n3     |n4
+ *         |          |
+ *         |  |c1     |
+ *         |          |      |c2
+ *         |          |
+ *
+ * n1 & c1: hr(g - c1)
+ * n1 & c2: resched_curr
+ *
+ * n2 & c1: hr(g - c1)
+ * n2 & c2: resched_curr
+ *
+ * n3 & c1: hr(n3 - c1)
+ * n3 & c2: resched_curr
+ *
+ * n4 & c1: hr(n4 - c1)
+ * n4 & c2: hr(n4 - c2)
+ */
+static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
+{
+	struct sched_entity *curr = &pcurr->se;
+	struct sched_entity *next = pick_next_entity(&rq->cfs, curr);
+	u64 curr_ran;
+	s64 delta;
+
+	if (rq->cfs.h_nr_running < 2 || curr == next)
+		return;
+
+	curr_ran = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
+	delta = sched_granularity - curr_ran;
+
+	// if c1
+	if (delta > 0) {
+		// if n1
+		if (entity_before(&next->bs_node, &curr->bs_node)) {
+			if (diff_vrt(curr, next) - sched_granularity < 0)
+				hrtick_start(rq, delta);
+			else
+				resched_curr(rq);
+		}
+		// if n2
+		else if (diff_vrt(next, curr) - delta < 0) {
+			hrtick_start(rq, delta);
+		}
+		// if n3 or n4
+		else {
+			hrtick_start(rq, diff_vrt(next, curr));
+		}
+	}
+	// if c2
+	else {
+		// if n1, n2, or n3
+		if (entity_before(&next->bs_node, &curr->bs_node)) {
+			resched_curr(rq);
+		}
+		// if n4
+		else {
+			hrtick_start(rq, diff_vrt(next, curr));
+		}
+	}
+}
+
+/*
+ * called from enqueue/dequeue and updates the hrtick when the
+ * current task is from our class.
+ */
+static void hrtick_update(struct rq *rq)
+{
+	struct task_struct *curr = rq->curr;
+
+	if (!hrtick_enabled_fair(rq) || curr->sched_class != &fair_sched_class)
+		return;
+
+	hrtick_start_fair(rq, curr);
+}
+#else /* !CONFIG_SCHED_HRTICK */
+static inline void
+hrtick_start_fair(struct rq *rq, struct task_struct *curr)
+{
+}
+
+static inline void hrtick_update(struct rq *rq)
+{
+}
+#endif
 
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
@@ -158,6 +269,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	add_nr_running(rq, 1);
+	hrtick_update(rq);
 }
 
 static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
@@ -172,6 +284,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	cfs_rq->idle_h_nr_running -= idle_h_nr_running;
 
 	sub_nr_running(rq, 1);
+	hrtick_update(rq);
 }
 
 static void yield_task_fair(struct rq *rq)
@@ -217,15 +330,6 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	se->exec_start = rq_clock_task(rq_of(cfs_rq));
 	cfs_rq->curr = se;
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
-}
-
-/**
- * Does a has smaller vruntime than b?
- */
-static inline bool
-entity_before(struct bs_node *a, struct bs_node *b)
-{
-	return (s64)(a->vruntime - b->vruntime) < 0;
 }
 
 static struct sched_entity *
@@ -395,6 +499,24 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 {
 	update_curr(cfs_rq);
 
+#ifdef CONFIG_SCHED_HRTICK
+	/*
+	 * queued ticks are scheduled to match the slice, so don't bother
+	 * validating it and just reschedule.
+	 */
+	if (queued) {
+		resched_curr(rq_of(cfs_rq));
+		return;
+	}
+
+	/*
+	 * don't let the period tick interfere with the hrtick preemption
+	 */
+	if (!sched_feat(DOUBLE_TICK) &&
+			hrtimer_active(&rq_of(cfs_rq)->hrtick_timer))
+		return;
+#endif
+
 	if (cfs_rq->nr_running > 1)
 		check_preempt_tick(cfs_rq, curr);
 }
@@ -429,6 +551,11 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		return;
 
 	update_curr(cfs_rq_of(se));
+
+	if (entity_before(&wse->bs_node, &se->bs_node))
+		goto preempt;
+
+	return;
 
 preempt:
 	resched_curr(rq);
