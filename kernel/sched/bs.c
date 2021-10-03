@@ -330,6 +330,8 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	se->exec_start = rq_clock_task(rq_of(cfs_rq));
 	cfs_rq->curr = se;
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
+
+	cfs_rq->min_vruntime = se->bs_node.vruntime;
 }
 
 static struct sched_entity *
@@ -374,8 +376,6 @@ again:
 	set_next_entity(cfs_rq, se);
 
 	p = task_of(se);
-
-	cfs_rq->min_vruntime = se->bs_node.vruntime;
 
 	if (prev)
 		YIELD_UNMARK(&prev->se.bs_node);
