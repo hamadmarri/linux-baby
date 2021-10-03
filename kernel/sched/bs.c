@@ -61,7 +61,7 @@ static void update_curr_fair(struct rq *rq)
 }
 
 /**
- * Does a has smaller vruntime than b?
+ * Does a have smaller vruntime than b?
  */
 static inline bool
 entity_before(struct bs_node *a, struct bs_node *b)
