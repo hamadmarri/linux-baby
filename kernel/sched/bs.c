@@ -808,7 +808,7 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 static void task_fork_fair(struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq;
-	struct sched_entity *curr;
+	struct sched_entity *curr, *se = &p->se;
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
 
@@ -816,6 +816,9 @@ static void task_fork_fair(struct task_struct *p)
 	update_rq_clock(rq);
 
 	cfs_rq = task_cfs_rq(current);
+
+	se->bs_node.deadline = calc_deadline(cfs_rq, se);
+
 	curr = cfs_rq->curr;
 	if (curr)
 		update_curr(cfs_rq);
