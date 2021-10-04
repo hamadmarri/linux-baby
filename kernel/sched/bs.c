@@ -46,6 +46,15 @@ calc_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	return deadline + prio_diff;
 }
 
+static inline bool
+reached_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	u64 now = rq_clock(rq_of(cfs_rq));
+	s64 delta = se->bs_node.deadline - now;
+
+	return (delta <= 0);
+}
+
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
@@ -62,7 +71,8 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->exec_start = now;
 	curr->sum_exec_runtime += delta_exec;
 
-	curr->bs_node.deadline = calc_deadline(cfs_rq, curr);
+	if (reached_deadline(cfs_rq, curr))
+		curr->bs_node.deadline = calc_deadline(cfs_rq, curr);
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -256,6 +266,19 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 static void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
+	int task_sleep = flags & DEQUEUE_SLEEP;
+	struct task_struct *p = task_of(se);
+
+	/*
+	 * Check if didn't reach its deadline, then
+	 * rise its priority
+	 */
+	if (task_sleep && !reached_deadline(cfs_rq, se)
+	    && PRIO_TO_NICE(p->prio) > -20)
+	{
+		p->prio--;
+	}
+
 	update_curr(cfs_rq);
 
 	if (se != cfs_rq->curr)
