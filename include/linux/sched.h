@@ -466,7 +466,7 @@ struct sched_statistics {
 struct bs_node {
 	struct bs_node*                 next;
 	struct bs_node*                 prev;
-	u64				vruntime;
+	u64				deadline;
 };
 #endif
 

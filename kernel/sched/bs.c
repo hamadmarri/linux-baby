@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Basic Scheduler (BS) Class (SCHED_NORMAL/SCHED_BATCH)
+ * Baby Scheduler (BS) Class (SCHED_NORMAL/SCHED_BATCH)
  *
  *  Copyright (C) 2021, Hamad Al Marri <hamad.s.almarri@gmail.com>
  */
@@ -11,28 +11,39 @@
 
 u64 sched_granularity = 590000ULL;
 
-#define HZ_PERIOD (1000000000 / HZ)
-#define RACE_TIME 40000000
-#define FACTOR (RACE_TIME / HZ_PERIOD)
+/* sched_granularity * 2 */
+#define DEADLINE_NS 1180000ULL;
 
-#define YIELD_MARK(bsn)		((bsn)->vruntime |= 0x8000000000000000ULL)
-#define YIELD_UNMARK(bsn)	((bsn)->vruntime &= 0x7FFFFFFFFFFFFFFFULL)
+const s64 prio_factor[40] = {
+ /* -20 */  -666666L, -633333L, -600000L, -566666L, -533333L,
+ /* -15 */  -500000L, -466666L, -433333L, -400000L, -366666L,
+ /* -10 */  -333333L, -300000L, -266666L, -233333L, -200000L,
+ /*  -5 */  -166666L, -133333L, -100000L, -66666L,  -33333L,
+ /*   0 */   0L,       33333L,   66666L,   100000L,  133333L,
+ /*   5 */   166666L,  200000L,  233333L,  266666L,  300000L,
+ /*  10 */   333333L,  366666L,  400000L,  433333L,  466666L,
+ /*  15 */   500000L,  533333L,  566666L,  600000L,  633333L
+};
 
-static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
+#define YIELD_MARK(bsn)		((bsn)->deadline |= 0x8000000000000000ULL)
+#define YIELD_UNMARK(bsn)	((bsn)->deadline &= 0x7FFFFFFFFFFFFFFFULL)
+
+static inline u64
+calc_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct task_struct *p = task_of(se);
 	s64 prio_diff;
+	u64 now = rq_clock(rq_of(cfs_rq));
+	u64 deadline = now + DEADLINE_NS;
 
 	if (PRIO_TO_NICE(p->prio) == 0)
-		return delta;
+		return deadline;
 
-	prio_diff = PRIO_TO_NICE(p->prio) * 1000000;
-	prio_diff /= FACTOR;
+	BUG_ON(PRIO_TO_NICE(p->prio) + 20 < 0);
 
-	if ((s64)(delta + prio_diff) < 0)
-		return 1;
+	prio_diff = prio_factor[PRIO_TO_NICE(p->prio) + 20];
 
-	return delta + prio_diff;
+	return deadline + prio_diff;
 }
 
 static void update_curr(struct cfs_rq *cfs_rq)
@@ -51,8 +62,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->exec_start = now;
 	curr->sum_exec_runtime += delta_exec;
 
-	curr->bs_node.vruntime += convert_to_vruntime(delta_exec, curr);
-	cfs_rq->min_vruntime = curr->bs_node.vruntime;
+	curr->bs_node.deadline = calc_deadline(cfs_rq, curr);
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -61,18 +71,18 @@ static void update_curr_fair(struct rq *rq)
 }
 
 /**
- * Does a have smaller vruntime than b?
+ * Does a have earlier deadline than b?
  */
 static inline bool
 entity_before(struct bs_node *a, struct bs_node *b)
 {
-	return (s64)(a->vruntime - b->vruntime) < 0;
+	return (s64)(a->deadline - b->deadline) < 0;
 }
 
 static inline s64
-diff_vrt(struct sched_entity *a, struct sched_entity *b)
+diff_dl(struct sched_entity *a, struct sched_entity *b)
 {
-	return (s64)(a->bs_node.vruntime - b->bs_node.vruntime);
+	return (s64)(a->bs_node.deadline - b->bs_node.deadline);
 }
 
 #ifdef CONFIG_SCHED_HRTICK
@@ -118,18 +128,18 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 	if (delta > 0) {
 		// if n1
 		if (entity_before(&next->bs_node, &curr->bs_node)) {
-			if (diff_vrt(curr, next) - sched_granularity < 0)
+			if (diff_dl(curr, next) - sched_granularity < 0)
 				hrtick_start(rq, delta);
 			else
 				resched_curr(rq);
 		}
 		// if n2
-		else if (diff_vrt(next, curr) - delta < 0) {
+		else if (diff_dl(next, curr) - delta < 0) {
 			hrtick_start(rq, delta);
 		}
 		// if n3 or n4
 		else {
-			hrtick_start(rq, diff_vrt(next, curr));
+			hrtick_start(rq, diff_dl(next, curr));
 		}
 	}
 	// if c2
@@ -140,7 +150,7 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 		}
 		// if n4
 		else {
-			hrtick_start(rq, diff_vrt(next, curr));
+			hrtick_start(rq, diff_dl(next, curr));
 		}
 	}
 }
@@ -215,25 +225,8 @@ static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	bool curr = cfs_rq->curr == se;
-	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
-
-	/*
-	 * If we're the current task, we must renormalise before calling
-	 * update_curr().
-	 */
-	if (renorm && curr)
-		se->bs_node.vruntime = cfs_rq->min_vruntime;
 
 	update_curr(cfs_rq);
-
-	/*
-	 * Otherwise, renormalise after, such that we're placed at the current
-	 * moment in time, instead of some random moment in the past. Being
-	 * placed in the past could significantly boost this task to the
-	 * fairness detriment of existing tasks.
-	 */
-	if (renorm && !curr)
-		se->bs_node.vruntime = cfs_rq->min_vruntime;
 
 	account_entity_enqueue(cfs_rq, se);
 
@@ -330,8 +323,6 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	se->exec_start = rq_clock_task(rq_of(cfs_rq));
 	cfs_rq->curr = se;
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
-
-	cfs_rq->min_vruntime = se->bs_node.vruntime;
 }
 
 static struct sched_entity *
