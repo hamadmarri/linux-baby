@@ -39,8 +39,6 @@ calc_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	if (PRIO_TO_NICE(p->prio) == 0)
 		return deadline;
 
-	BUG_ON(PRIO_TO_NICE(p->prio) + 20 < 0);
-
 	prio_diff = prio_factor[PRIO_TO_NICE(p->prio) + 20];
 
 	return deadline + prio_diff;
