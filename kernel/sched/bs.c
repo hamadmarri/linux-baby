@@ -639,7 +639,7 @@ can_migrate_task(struct task_struct *p, int dst_cpu, struct rq *src_rq)
 	return 1;
 }
 
-static void pull_from(struct rq *this_rq,
+static void pull_from(struct rq *dist_rq,
 		      struct rq *src_rq,
 		      struct rq_flags *src_rf,
 		      struct task_struct *p)
@@ -648,49 +648,50 @@ static void pull_from(struct rq *this_rq,
 
 	// detach task
 	deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
-	set_task_cpu(p, cpu_of(this_rq));
+	set_task_cpu(p, cpu_of(dist_rq));
 
 	// unlock src rq
 	rq_unlock(src_rq, src_rf);
 
-	// lock this rq
-	rq_lock(this_rq, &rf);
-	update_rq_clock(this_rq);
+	// lock dist rq
+	rq_lock(dist_rq, &rf);
+	update_rq_clock(dist_rq);
 
-	activate_task(this_rq, p, ENQUEUE_NOCLOCK);
-	check_preempt_curr(this_rq, p, 0);
+	activate_task(dist_rq, p, ENQUEUE_NOCLOCK);
+	check_preempt_curr(dist_rq, p, 0);
 
-	// unlock this rq
-	rq_unlock(this_rq, &rf);
+	// unlock dist rq
+	rq_unlock(dist_rq, &rf);
 
 	local_irq_restore(src_rf->flags);
 }
 
-static int move_task(struct rq *this_rq, struct rq *src_rq,
+static int move_task(struct rq *dist_rq, struct rq *src_rq,
 			struct rq_flags *src_rf)
 {
 	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
 	struct task_struct *p;
 	struct bs_node *bsn = src_cfs_rq->head;
-	int moved = 0;
 
 	while (bsn) {
 		p = task_of(se_of(bsn));
-		if (can_migrate_task(p, cpu_of(this_rq), src_rq)) {
-			pull_from(this_rq, src_rq, src_rf, p);
-			moved = 1;
-			break;
+		if (can_migrate_task(p, cpu_of(dist_rq), src_rq)) {
+			pull_from(dist_rq, src_rq, src_rf, p);
+			return 1;
 		}
 
 		bsn = bsn->next;
 	}
 
-	if (!moved) {
-		rq_unlock(src_rq, src_rf);
-		local_irq_restore(src_rf->flags);
-	}
+	/*
+	 * Here we know we have not migrated any task,
+	 * thus, we need to unlock and return 0
+	 * Note: the pull_from does the unlocking for us.
+	 */
+	rq_unlock(src_rq, src_rf);
+	local_irq_restore(src_rf->flags);
 
-	return moved;
+	return 0;
 }
 
 static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
