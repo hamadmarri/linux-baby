@@ -2,7 +2,7 @@
 
 choice
 	prompt "Preemption Model"
-	default PREEMPT_NONE
+	default PREEMPT
 
 config PREEMPT_NONE
 	bool "No Forced Preemption (Server)"
@@ -103,6 +103,7 @@ config PREEMPT_DYNAMIC
 config SCHED_CORE
 	bool "Core Scheduling for SMT"
 	depends on SCHED_SMT
+	depends on !BS_SCHED
 	help
 	  This option permits Core Scheduling, a means of coordinated task
 	  selection across SMT siblings. When enabled -- see
