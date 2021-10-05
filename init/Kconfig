@@ -107,8 +107,9 @@ config THREAD_INFO_IN_TASK
 
 config BS_SCHED
 	bool "Baby Scheduler"
-	depends on HZ_PERIODIC && !NO_HZ && !SCHED_AUTOGROUP && !CGROUP_SCHED && !UCLAMP_TASK && !SCHED_CORE
 	default y
+	select TICK_CPU_ACCOUNTING
+	select PREEMPT
 	help
 	  This is a very basic and lightweight yet very performant CPU scheduler.
 	  You can use it for learning purposes as a base ground CPU scheduler on
@@ -816,6 +817,7 @@ menu "Scheduler features"
 config UCLAMP_TASK
 	bool "Enable utilization clamping for RT/FAIR tasks"
 	depends on CPU_FREQ_GOV_SCHEDUTIL
+	depends on !BS_SCHED
 	help
 	  This feature enables the scheduler to track the clamped utilization
 	  of each CPU based on RUNNABLE tasks scheduled on that CPU.
@@ -981,6 +983,7 @@ config CGROUP_WRITEBACK
 
 menuconfig CGROUP_SCHED
 	bool "CPU controller"
+	depends on !BS_SCHED
 	default n
 	help
 	  This feature lets CPU scheduler recognize task groups and control CPU
@@ -1258,6 +1261,8 @@ config CHECKPOINT_RESTORE
 
 config SCHED_AUTOGROUP
 	bool "Automatic process group scheduling"
+	default n
+	depends on !BS_SCHED
 	select CGROUPS
 	select CGROUP_SCHED
 	select FAIR_GROUP_SCHED
@@ -1447,6 +1452,7 @@ config BPF
 menuconfig EXPERT
 	bool "Configure standard kernel features (expert users)"
 	# Unhide debug options, to make the on-by-default options visible
+	depends on !BS_SCHED
 	select DEBUG_KERNEL
 	help
 	  This option allows certain base kernel options and settings
