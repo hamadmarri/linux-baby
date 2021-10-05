@@ -9,10 +9,10 @@
 #include "fair_numa.h"
 #include "bs.h"
 
-u64 sched_granularity = 590000ULL;
+#define MIN_DEADLINE_NS	 590000ULL
 
-/* sched_granularity * 2 */
-#define DEADLINE_NS 1180000ULL;
+/* MIN_DEADLINE_NS * 2 */
+#define DEADLINE_NS	1180000ULL
 
 const s64 prio_factor[40] = {
  /* -20 */  -666666L, -633333L, -600000L, -566666L, -533333L,
@@ -98,65 +98,69 @@ static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr);
 
 /*
- *         cs         g
- *         |   gran   |
- *         |<-------->|
- *  |n1    |      |n2 |  |n3     |n4
- *         |          |
- *         |  |c1     |
- *         |          |      |c2
- *         |          |
+ *     cs         cm         cd
+ *     |  min dl  |          |
+ *     |<-------->|          |
+ *  n1 |    n1    |    n2    | n3
+ *  @@@|@@@@@@@@@@|##########|****
+ *     | c1       |          |
+ *     | ^        |    c2    |
+ *     |now       |    ^     |
+ *     |          |   now    |
  *
- * n1 & c1: hr(g - c1)
- * n1 & c2: resched_curr
- *
- * n2 & c1: hr(g - c1)
- * n2 & c2: resched_curr
- *
+ * n1 & c1: hr(cm - c1)
+ * n2 & c1: hr(cd - c1)
  * n3 & c1: hr(n3 - c1)
- * n3 & c2: resched_curr
  *
- * n4 & c1: hr(n4 - c1)
- * n4 & c2: hr(n4 - c2)
+ * n1 & c2: resched_curr
+ * n2 & c2: hr(cd - c2)
+ * n3 & c2: hr(n3 - c2)
  */
 static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 {
 	struct sched_entity *curr = &pcurr->se;
-	struct sched_entity *next = pick_next_entity(&rq->cfs, curr);
-	u64 curr_ran;
-	s64 delta;
+	struct bs_node *c_bsn = &curr->bs_node;
+	struct sched_entity *next;
+	u64 now = rq_clock(rq);
+	s64 cm, cd;
 
-	if (rq->cfs.h_nr_running < 2 || curr == next)
+	if (rq->cfs.h_nr_running < 2)
 		return;
 
-	curr_ran = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
-	delta = sched_granularity - curr_ran;
+	next = pick_next_entity(&rq->cfs, NULL);
+
+	if (!next)
+		return;
+
+	cd = c_bsn->deadline - now;
+	cm = cd - MIN_DEADLINE_NS;
 
 	// if c1
-	if (delta > 0) {
-		// if n1
-		if (entity_before(&next->bs_node, &curr->bs_node)) {
-			if (diff_dl(curr, next) - sched_granularity < 0)
-				hrtick_start(rq, delta);
+	if (cm > 0) {
+		if (entity_before(&next->bs_node, c_bsn)) {
+			// if n1
+			if (diff_dl(curr, next) - MIN_DEADLINE_NS > 0)
+				hrtick_start(rq, cm);
+			// if n2
 			else
-				resched_curr(rq);
+				hrtick_start(rq, cd);
 		}
-		// if n2
-		else if (diff_dl(next, curr) - delta < 0) {
-			hrtick_start(rq, delta);
-		}
-		// if n3 or n4
+		// if n3
 		else {
 			hrtick_start(rq, diff_dl(next, curr));
 		}
 	}
 	// if c2
 	else {
-		// if n1, n2, or n3
-		if (entity_before(&next->bs_node, &curr->bs_node)) {
-			resched_curr(rq);
+		if (entity_before(&next->bs_node, c_bsn)) {
+			// if n1
+			if (diff_dl(curr, next) - MIN_DEADLINE_NS > 0)
+				resched_curr(rq);
+			// if n2
+			else
+				hrtick_start(rq, cd);
 		}
-		// if n4
+		// if n3
 		else {
 			hrtick_start(rq, diff_dl(next, curr));
 		}
