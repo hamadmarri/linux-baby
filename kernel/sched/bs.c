@@ -390,6 +390,9 @@ done: __maybe_unused;
 	list_move(&p->se.group_node, &rq->cfs_tasks);
 #endif
 
+	if (hrtick_enabled_fair(rq))
+		hrtick_start_fair(rq, p);
+
 	return p;
 
 idle:
