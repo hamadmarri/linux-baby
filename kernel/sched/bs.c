@@ -239,17 +239,10 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	bool curr = cfs_rq->curr == se;
 	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
 
-	/*
-	 * If we're the current task, we must renormalise before calling
-	 * update_curr().
-	 */
-	if (renorm && curr)
-		se->bs_node.deadline = calc_deadline(cfs_rq, se);
-
 	update_curr(cfs_rq);
 
 	/*
-	 * Otherwise, renormalise after, such that we're placed at the current
+	 * Renormalise, such that we're placed at the current
 	 * moment in time, instead of some random moment in the past. Being
 	 * placed in the past could significantly boost this task to the
 	 * fairness detriment of existing tasks.
@@ -275,8 +268,8 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 * Check if didn't reach its deadline, then
 	 * rise its priority
 	 */
-	if (task_sleep && !reached_deadline(cfs_rq, se)
-	    && PRIO_TO_NICE(p->prio) > -20)
+	if (task_sleep && !reached_deadline(cfs_rq, se) &&
+	    PRIO_TO_NICE(p->prio) > -20)
 	{
 		p->prio--;
 	}
