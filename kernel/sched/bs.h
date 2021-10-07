@@ -1,4 +1,7 @@
 
+#define REFILL_CASH 1000000000ULL
+#define SLICES_NUM 12
+
 /*
  * After fork, child runs first. If set to 0 (default) then
  * parent will (try to) run first.
@@ -41,6 +44,9 @@ void init_cfs_rq(struct cfs_rq *cfs_rq)
 #ifdef CONFIG_SMP
 	raw_spin_lock_init(&cfs_rq->removed.lock);
 #endif
+
+	cfs_rq->cash	= REFILL_CASH;
+	cfs_rq->slices	= SLICES_NUM;
 }
 
 __init void init_sched_fair_class(void) {}

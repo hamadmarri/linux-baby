@@ -9,10 +9,17 @@
 #include "fair_numa.h"
 #include "bs.h"
 
-#define MIN_DEADLINE_NS	 590000ULL
+#define SLICE_NS	 1000000ULL // 1ms
+#define CREDIT_MAX	100000000ULL
 
-/* MIN_DEADLINE_NS * 2 */
-#define DEADLINE_NS	1180000ULL
+#define RAISE_STEP 10
+
+#define RAISE_BID(bsn) if ((bsn)->bid < 100) (bsn)->bid += (RAISE_STEP)
+#define RESET_BID(bsn) ((bsn)->bid = RAISE_STEP)
+
+#define DELTA_EXEC(se) ((s64)(se->sum_exec_runtime - se->prev_sum_exec_runtime))
+#define EXCEEDED_SLICE(se) ( ((DELTA_EXEC((se))) >= SLICE_NS) )
+
 
 const s64 prio_factor[40] = {
  /* -20 */  -666666L, -633333L, -600000L, -566666L, -533333L,
@@ -25,32 +32,82 @@ const s64 prio_factor[40] = {
  /*  15 */   500000L,  533333L,  566666L,  600000L,  633333L
 };
 
-#define YIELD_MARK(bsn)		((bsn)->deadline |= 0x8000000000000000ULL)
-#define YIELD_UNMARK(bsn)	((bsn)->deadline &= 0x7FFFFFFFFFFFFFFFULL)
+//#define YIELD_MARK(bsn)		((bsn)->credit |= 0x8000000000000000ULL)
+//#define YIELD_UNMARK(bsn)	((bsn)->credit &= 0x7FFFFFFFFFFFFFFFULL)
 
 static inline u64
-calc_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
+calc_credit(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	struct task_struct *p = task_of(se);
-	s64 prio_diff;
-	u64 now = rq_clock(rq_of(cfs_rq));
-	u64 deadline = now + DEADLINE_NS;
+	//struct task_struct *p = task_of(se);
+	//s64 prio_diff;
+	//u64 now = rq_clock(rq_of(cfs_rq));
+	u64 credit = cfs_rq->cash;
 
-	if (PRIO_TO_NICE(p->prio) == 0)
-		return deadline;
+	if (cfs_rq->nr_running > 1)
+		credit /= (u64)(cfs_rq->nr_running);
+	else
+		credit = CREDIT_MAX;
 
-	prio_diff = prio_factor[PRIO_TO_NICE(p->prio) + 20];
+	//if (PRIO_TO_NICE(p->prio) == 0)
+		//return credit;
 
-	return deadline + prio_diff;
+	//prio_diff = prio_factor[PRIO_TO_NICE(p->prio) + 20];
+
+
+	credit = min_t(u64, credit, CREDIT_MAX);
+
+	//return credit + prio_diff;
+	return credit;
 }
 
-static inline bool
-reached_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static inline void
+get_payment(struct cfs_rq *cfs_rq, struct bs_node *bsn)
 {
-	u64 now = rq_clock(rq_of(cfs_rq));
-	s64 delta = se->bs_node.deadline - now;
+	u64 payment = calc_credit(cfs_rq, se_of(bsn));
 
-	return (delta <= 0);
+	payment = min_t(u64, payment, cfs_rq->cash);
+	bsn->credit  += payment;
+	cfs_rq->cash -= payment;
+
+	//printk("*************** PAYMENT %llu -> %llu -> %lld (%s)",
+		//cfs_rq->cash, payment, bsn->credit, task_of(se_of(bsn))->comm);
+}
+
+static inline void redistribute_cash(struct cfs_rq *cfs_rq)
+{
+	struct bs_node *bsn = cfs_rq->head;
+
+	//printk("*************** REDISTRIBUTE");
+
+	// don't forget curr
+	get_payment(cfs_rq, &cfs_rq->curr->bs_node);
+
+	while (bsn) {
+		get_payment(cfs_rq, bsn);
+		bsn = bsn->next;
+	}
+}
+
+static inline void
+charge(struct cfs_rq *cfs_rq, struct bs_node *bsn)
+{
+	u64 charge;
+
+	if (!cfs_rq->slices) {
+		cfs_rq->cash = REFILL_CASH;
+		redistribute_cash(cfs_rq);
+		cfs_rq->slices = SLICES_NUM;
+	}
+
+	cfs_rq->slices--;
+
+	charge = bsn->credit * bsn->bid / 100ULL;
+
+	bsn->credit  -= charge;
+	cfs_rq->cash += charge;
+
+	//printk("*************** CHARGE %llu <- %llu <- %lld (%s)",
+		//cfs_rq->cash, charge, bsn->credit, task_of(se_of(bsn))->comm);
 }
 
 static void update_curr(struct cfs_rq *cfs_rq)
@@ -68,9 +125,6 @@ static void update_curr(struct cfs_rq *cfs_rq)
 
 	curr->exec_start = now;
 	curr->sum_exec_runtime += delta_exec;
-
-	if (reached_deadline(cfs_rq, curr))
-		curr->bs_node.deadline = calc_deadline(cfs_rq, curr);
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -79,92 +133,29 @@ static void update_curr_fair(struct rq *rq)
 }
 
 /**
- * Does a have earlier deadline than b?
+ * Does a bid more than b?
  */
 static inline bool
 entity_before(struct bs_node *a, struct bs_node *b)
 {
-	return (s64)(a->deadline - b->deadline) < 0;
-}
+	u64 bid_a, bid_b;
 
-static inline s64
-diff_dl(struct sched_entity *a, struct sched_entity *b)
-{
-	return (s64)(a->bs_node.deadline - b->bs_node.deadline);
+	bid_a = a->credit * a->bid / 100ULL;
+	bid_b = b->credit * b->bid / 100ULL;
+
+	return (s64)(bid_a - bid_b) > 0;
 }
 
 #ifdef CONFIG_SCHED_HRTICK
-static struct sched_entity *
-pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr);
-
-/*
- *     cs         cm         cd
- *     |  min dl  |          |
- *     |<-------->|          |
- *  n1 |    n1    |    n2    | n3
- *  @@@|@@@@@@@@@@|##########|****
- *     | c1       |          |
- *     | ^        |    c2    |
- *     |now       |    ^     |
- *     |          |   now    |
- *
- * n1 & c1: hr(cm - c1)
- * n2 & c1: hr(cd - c1)
- * n3 & c1: hr(n3 - c1)
- *
- * n1 & c2: resched_curr
- * n2 & c2: hr(cd - c2)
- * n3 & c2: hr(n3 - c2)
- */
 static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 {
 	struct sched_entity *curr = &pcurr->se;
-	struct bs_node *c_bsn = &curr->bs_node;
-	struct sched_entity *next;
-	u64 now = rq_clock(rq);
-	s64 cm, cd;
+	s64 delta = DELTA_EXEC(curr);
 
-	if (rq->cfs.h_nr_running < 2)
-		return;
-
-	next = pick_next_entity(&rq->cfs, NULL);
-
-	if (!next)
-		return;
-
-	cd = c_bsn->deadline - now;
-	cm = cd - MIN_DEADLINE_NS;
-
-	// if c1
-	if (cm > 0) {
-		if (entity_before(&next->bs_node, c_bsn)) {
-			// if n1
-			if (diff_dl(curr, next) - MIN_DEADLINE_NS > 0)
-				hrtick_start(rq, cm);
-			// if n2
-			else
-				hrtick_start(rq, cd);
-		}
-		// if n3
-		else {
-			hrtick_start(rq, diff_dl(next, curr));
-		}
-	}
-	// if c2
-	else {
-		if (entity_before(&next->bs_node, c_bsn)) {
-			// if n1
-			if (diff_dl(curr, next) - MIN_DEADLINE_NS > 0)
-				resched_curr(rq);
-			// if n2
-			else
-				hrtick_start(rq, cd);
-		}
-		// if n3
-		else {
-			hrtick_start(rq, diff_dl(next, curr));
-		}
-	}
+	if (EXCEEDED_SLICE(curr))
+		resched_curr(rq);
+	else
+		hrtick_start(rq, delta);
 }
 
 /*
@@ -237,18 +228,10 @@ static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	bool curr = cfs_rq->curr == se;
-	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
 
 	update_curr(cfs_rq);
 
-	/*
-	 * Renormalise, such that we're placed at the current
-	 * moment in time, instead of some random moment in the past. Being
-	 * placed in the past could significantly boost this task to the
-	 * fairness detriment of existing tasks.
-	 */
-	if (renorm && !curr)
-		se->bs_node.deadline = calc_deadline(cfs_rq, se);
+	get_payment(cfs_rq, &se->bs_node);
 
 	account_entity_enqueue(cfs_rq, se);
 
@@ -261,20 +244,10 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 static void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
-	int task_sleep = flags & DEQUEUE_SLEEP;
-	struct task_struct *p = task_of(se);
-
-	/*
-	 * Check if didn't reach its deadline, then
-	 * rise its priority
-	 */
-	if (task_sleep && !reached_deadline(cfs_rq, se) &&
-	    PRIO_TO_NICE(p->prio) > -20)
-	{
-		p->prio--;
-	}
-
 	update_curr(cfs_rq);
+
+	//if (cfs_rq->cash - CASH_MAX < 0)
+		//cfs_rq->cash += se->bs_node.credit;
 
 	if (se != cfs_rq->curr)
 		__dequeue_entity(cfs_rq, se);
@@ -320,7 +293,7 @@ static void yield_task_fair(struct rq *rq)
 	struct task_struct *curr = rq->curr;
 	struct cfs_rq *cfs_rq = task_cfs_rq(curr);
 
-	YIELD_MARK(&curr->se.bs_node);
+	//YIELD_MARK(&curr->se.bs_node);
 
 	/*
 	 * Are we the only task in the tree?
@@ -358,6 +331,9 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	se->exec_start = rq_clock_task(rq_of(cfs_rq));
 	cfs_rq->curr = se;
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
+
+	charge(cfs_rq, &se->bs_node);
+	RESET_BID(&se->bs_node);
 }
 
 static struct sched_entity *
@@ -371,8 +347,12 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 
 	next = bsn->next;
 	while (next) {
-		if (entity_before(next, bsn))
+		if (entity_before(next, bsn)) {
+			RAISE_BID(bsn);
 			bsn = next;
+		} else {
+			RAISE_BID(next);
+		}
 
 		next = next->next;
 	}
@@ -403,8 +383,8 @@ again:
 
 	p = task_of(se);
 
-	if (prev)
-		YIELD_UNMARK(&prev->se.bs_node);
+	//if (prev)
+		//YIELD_UNMARK(&prev->se.bs_node);
 
 done: __maybe_unused;
 #ifdef CONFIG_SMP
@@ -519,7 +499,7 @@ static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	if (pick_next_entity(cfs_rq, curr) != curr)
+	if (EXCEEDED_SLICE(curr))
 		resched_curr(rq_of(cfs_rq));
 }
 
@@ -548,6 +528,8 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 
 	if (cfs_rq->nr_running > 1)
 		check_preempt_tick(cfs_rq, curr);
+	else if (EXCEEDED_SLICE(curr))
+		charge(cfs_rq, &curr->bs_node);
 }
 
 static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
@@ -848,15 +830,18 @@ static void task_fork_fair(struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *curr, *se = &p->se;
+	struct bs_node *bsn = &se->bs_node;
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
+	bsn->credit = 0;
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
 
 	cfs_rq = task_cfs_rq(current);
 
-	se->bs_node.deadline = calc_deadline(cfs_rq, se);
+	get_payment(cfs_rq, bsn);
+	bsn->bid = 10;
 
 	curr = cfs_rq->curr;
 	if (curr)

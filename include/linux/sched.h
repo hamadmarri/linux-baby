@@ -466,7 +466,8 @@ struct sched_statistics {
 struct bs_node {
 	struct bs_node*                 next;
 	struct bs_node*                 prev;
-	u64				deadline;
+	s64				credit;
+	unsigned int			bid;
 };
 #endif
 
