@@ -122,7 +122,7 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 	struct bs_node *c_bsn = &curr->bs_node;
 	struct sched_entity *next;
 	u64 now = rq_clock(rq);
-	s64 cm, cd;
+	s64 cm, cd, c_ran;
 
 	if (rq->cfs.h_nr_running < 2)
 		return;
@@ -132,11 +132,12 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 	if (!next)
 		return;
 
-	cd = c_bsn->deadline - now;
-	cm = cd - MIN_DEADLINE_NS;
+	c_ran	= curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
+	cm	= MIN_DEADLINE_NS - c_ran;
+	cd	= c_bsn->deadline - now;
 
-	// if c1
-	if (cm > 0) {
+	// if c1 (if 590us >= current ran)
+	if (cm >= 0) {
 		if (entity_before(&next->bs_node, c_bsn)) {
 			// if n1
 			if (diff_dl(curr, next) - MIN_DEADLINE_NS > 0)
