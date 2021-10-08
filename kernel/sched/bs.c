@@ -87,13 +87,11 @@ entity_before(struct bs_node *a, struct bs_node *b)
 	return (s64)(a->deadline - b->deadline) < 0;
 }
 
-static inline s64
-diff_dl(struct sched_entity *a, struct sched_entity *b)
-{
-	return (s64)(a->bs_node.deadline - b->bs_node.deadline);
-}
-
 #ifdef CONFIG_SCHED_HRTICK
+
+#define DIFF_DL(a, b) ( (s64)((a)->bs_node.deadline - (b)->bs_node.deadline) )
+#define DIFF_DL_NOW(a, now) ( (s64)((a)->bs_node.deadline - (now)) )
+
 static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr);
 
@@ -134,13 +132,13 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 
 	c_ran	= curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
 	cm	= MIN_DEADLINE_NS - c_ran;
-	cd	= c_bsn->deadline - now;
+	cd	= DIFF_DL_NOW(curr, now);
 
 	// if c1 (if 590us >= current ran)
 	if (cm >= 0) {
 		if (entity_before(&next->bs_node, c_bsn)) {
 			// if n1
-			if (diff_dl(curr, next) - MIN_DEADLINE_NS > 0)
+			if (DIFF_DL(curr, next) - MIN_DEADLINE_NS > 0)
 				hrtick_start(rq, cm);
 			// if n2
 			else
@@ -148,14 +146,14 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 		}
 		// if n3
 		else {
-			hrtick_start(rq, diff_dl(next, curr));
+			hrtick_start(rq, DIFF_DL_NOW(next, now));
 		}
 	}
 	// if c2
 	else {
 		if (entity_before(&next->bs_node, c_bsn)) {
 			// if n1
-			if (diff_dl(curr, next) - MIN_DEADLINE_NS > 0)
+			if (DIFF_DL(curr, next) - MIN_DEADLINE_NS > 0)
 				resched_curr(rq);
 			// if n2
 			else
@@ -163,7 +161,7 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 		}
 		// if n3
 		else {
-			hrtick_start(rq, diff_dl(next, curr));
+			hrtick_start(rq, DIFF_DL_NOW(next, now));
 		}
 	}
 }
