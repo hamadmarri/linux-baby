@@ -357,6 +357,9 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	se->exec_start = rq_clock_task(rq_of(cfs_rq));
 	cfs_rq->curr = se;
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
+
+	if (reached_deadline(cfs_rq, se))
+		se->bs_node.deadline = calc_deadline(cfs_rq, se);
 }
 
 static struct sched_entity *
