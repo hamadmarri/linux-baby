@@ -351,6 +351,8 @@ static bool yield_to_task_fair(struct rq *rq, struct task_struct *p)
 static void
 set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	int nice = PRIO_TO_NICE(task_of(se)->prio);
+
 	if (se->on_rq)
 		__dequeue_entity(cfs_rq, se);
 
@@ -358,7 +360,7 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	cfs_rq->curr = se;
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
 
-	if (reached_deadline(cfs_rq, se))
+	if (nice >= 0 && reached_deadline(cfs_rq, se))
 		se->bs_node.deadline = calc_deadline(cfs_rq, se);
 }
 
