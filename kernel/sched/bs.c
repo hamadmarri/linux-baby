@@ -18,6 +18,8 @@ u64 sched_granularity = 590000ULL;
 #define YIELD_MARK(bsn)		((bsn)->vruntime |= 0x8000000000000000ULL)
 #define YIELD_UNMARK(bsn)	((bsn)->vruntime &= 0x7FFFFFFFFFFFFFFFULL)
 
+#define HRRN_MAX_LIFE_NS 5000000000ULL
+
 static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 {
 	struct task_struct *p = task_of(se);
@@ -35,10 +37,37 @@ static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 	return delta + prio_diff;
 }
 
+static inline void normalize_lifetime(u64 now, struct bs_node *bsn)
+{
+	u64 life_time, old_hrrn_x;
+	s64 diff;
+
+	life_time	= now - bsn->hrrn_start_time;
+	diff		= life_time - HRRN_MAX_LIFE_NS;
+
+	if (diff > 0) {
+		// unmark YIELD. No need to check or remark since
+		// this normalize action doesn't happen very often
+		YIELD_UNMARK(bsn);
+
+		// multiply life_time by 1024 for more precision
+		old_hrrn_x = (life_time << 7) / ((bsn->vruntime >> 3) | 1);
+
+		// reset life to half max_life (i.e ~2.5s)
+		bsn->hrrn_start_time = now - (HRRN_MAX_LIFE_NS >> 1);
+
+		// avoid division by zero
+		if (old_hrrn_x == 0) old_hrrn_x = 1;
+
+		// reset vruntime based on old hrrn ratio
+		bsn->vruntime = (HRRN_MAX_LIFE_NS << 9) / old_hrrn_x;
+	}
+}
+
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
-	u64 now = rq_clock_task(rq_of(cfs_rq));
+	u64 now = sched_clock();
 	u64 delta_exec;
 
 	if (unlikely(!curr))
@@ -52,12 +81,20 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->sum_exec_runtime += delta_exec;
 
 	curr->bs_node.vruntime += convert_to_vruntime(delta_exec, curr);
-	cfs_rq->min_vruntime = curr->bs_node.vruntime;
+	normalize_lifetime(now, &curr->bs_node);
 }
 
 static void update_curr_fair(struct rq *rq)
 {
 	update_curr(cfs_rq_of(&rq->curr->se));
+}
+
+static inline u64 calc_hrrn(u64 now, struct bs_node *bsn)
+{
+	u64 l = now - bsn->hrrn_start_time;
+	u64 r = bsn->vruntime | 1;
+
+	return l / r;
 }
 
 /**
@@ -66,108 +103,11 @@ static void update_curr_fair(struct rq *rq)
 static inline bool
 entity_before(struct bs_node *a, struct bs_node *b)
 {
-	return (s64)(a->vruntime - b->vruntime) < 0;
+	u64 a_hrrn = calc_hrrn(sched_clock(), a);
+	u64 b_hrrn = calc_hrrn(sched_clock(), b);
+
+	return (s64)(a_hrrn - b_hrrn) > 0;
 }
-
-static inline s64
-diff_vrt(struct sched_entity *a, struct sched_entity *b)
-{
-	return (s64)(a->bs_node.vruntime - b->bs_node.vruntime);
-}
-
-#ifdef CONFIG_SCHED_HRTICK
-static struct sched_entity *
-pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr);
-
-/*
- *         cs         g
- *         |   gran   |
- *         |<-------->|
- *  |n1    |      |n2 |  |n3     |n4
- *         |          |
- *         |  |c1     |
- *         |          |      |c2
- *         |          |
- *
- * n1 & c1: hr(g - c1)
- * n1 & c2: resched_curr
- *
- * n2 & c1: hr(g - c1)
- * n2 & c2: resched_curr
- *
- * n3 & c1: hr(n3 - c1)
- * n3 & c2: resched_curr
- *
- * n4 & c1: hr(n4 - c1)
- * n4 & c2: hr(n4 - c2)
- */
-static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
-{
-	struct sched_entity *curr = &pcurr->se;
-	struct sched_entity *next = pick_next_entity(&rq->cfs, curr);
-	u64 curr_ran;
-	s64 delta;
-
-	if (rq->cfs.h_nr_running < 2 || curr == next)
-		return;
-
-	curr_ran = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
-	delta = sched_granularity - curr_ran;
-
-	// if c1
-	if (delta > 0) {
-		// if n1
-		if (entity_before(&next->bs_node, &curr->bs_node)) {
-			if (diff_vrt(curr, next) - sched_granularity < 0)
-				hrtick_start(rq, delta);
-			else
-				resched_curr(rq);
-		}
-		// if n2
-		else if (diff_vrt(next, curr) - delta < 0) {
-			hrtick_start(rq, delta);
-		}
-		// if n3 or n4
-		else {
-			hrtick_start(rq, diff_vrt(next, curr));
-		}
-	}
-	// if c2
-	else {
-		// if n1, n2, or n3
-		if (entity_before(&next->bs_node, &curr->bs_node)) {
-			resched_curr(rq);
-		}
-		// if n4
-		else {
-			hrtick_start(rq, diff_vrt(next, curr));
-		}
-	}
-}
-
-/*
- * called from enqueue/dequeue and updates the hrtick when the
- * current task is from our class.
- */
-static void hrtick_update(struct rq *rq)
-{
-	struct task_struct *curr = rq->curr;
-
-	if (!hrtick_enabled_fair(rq) || curr->sched_class != &fair_sched_class)
-		return;
-
-	hrtick_start_fair(rq, curr);
-}
-#else /* !CONFIG_SCHED_HRTICK */
-static inline void
-hrtick_start_fair(struct rq *rq, struct task_struct *curr)
-{
-}
-
-static inline void hrtick_update(struct rq *rq)
-{
-}
-#endif
 
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
@@ -211,29 +151,12 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	}
 }
 
-static void
+static inline void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	bool curr = cfs_rq->curr == se;
-	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
-
-	/*
-	 * If we're the current task, we must renormalise before calling
-	 * update_curr().
-	 */
-	if (renorm && curr)
-		se->bs_node.vruntime = cfs_rq->min_vruntime;
 
 	update_curr(cfs_rq);
-
-	/*
-	 * Otherwise, renormalise after, such that we're placed at the current
-	 * moment in time, instead of some random moment in the past. Being
-	 * placed in the past could significantly boost this task to the
-	 * fairness detriment of existing tasks.
-	 */
-	if (renorm && !curr)
-		se->bs_node.vruntime = cfs_rq->min_vruntime;
 
 	account_entity_enqueue(cfs_rq, se);
 
@@ -243,7 +166,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	se->on_rq = 1;
 }
 
-static void
+static inline void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	update_curr(cfs_rq);
@@ -269,7 +192,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	add_nr_running(rq, 1);
-	hrtick_update(rq);
 }
 
 static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
@@ -284,7 +206,6 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	cfs_rq->idle_h_nr_running -= idle_h_nr_running;
 
 	sub_nr_running(rq, 1);
-	hrtick_update(rq);
 }
 
 static void yield_task_fair(struct rq *rq)
@@ -327,11 +248,9 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	if (se->on_rq)
 		__dequeue_entity(cfs_rq, se);
 
-	se->exec_start = rq_clock_task(rq_of(cfs_rq));
+	se->exec_start = sched_clock();
 	cfs_rq->curr = se;
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
-
-	cfs_rq->min_vruntime = se->bs_node.vruntime;
 }
 
 static struct sched_entity *
@@ -389,9 +308,6 @@ done: __maybe_unused;
 	 */
 	list_move(&p->se.group_node, &rq->cfs_tasks);
 #endif
-
-	if (hrtick_enabled_fair(rq))
-		hrtick_start_fair(rq, p);
 
 	return p;
 
@@ -501,24 +417,6 @@ static void
 entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 {
 	update_curr(cfs_rq);
-
-#ifdef CONFIG_SCHED_HRTICK
-	/*
-	 * queued ticks are scheduled to match the slice, so don't bother
-	 * validating it and just reschedule.
-	 */
-	if (queued) {
-		resched_curr(rq_of(cfs_rq));
-		return;
-	}
-
-	/*
-	 * don't let the period tick interfere with the hrtick preemption
-	 */
-	if (!sched_feat(DOUBLE_TICK) &&
-			hrtimer_active(&rq_of(cfs_rq)->hrtick_timer))
-		return;
-#endif
 
 	if (cfs_rq->nr_running > 1)
 		check_preempt_tick(cfs_rq, curr);
@@ -823,6 +721,8 @@ static void task_fork_fair(struct task_struct *p)
 	struct sched_entity *curr;
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
+
+	p->se.bs_node.vruntime = 0;
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
