@@ -464,9 +464,13 @@ struct sched_statistics {
 
 #ifdef CONFIG_BS_SCHED
 struct bs_node {
-	struct bs_node*                 next;
-	struct bs_node*                 prev;
-	u64				deadline;
+	struct bs_node*	next;
+	struct bs_node*	prev;
+	u64		deadline;
+	u64		prev_bursts;
+	u64		bursts;
+	u64		start_time;
+
 };
 #endif
 
@@ -478,7 +482,7 @@ struct sched_entity {
 	unsigned int			on_rq;
 
 #ifdef CONFIG_BS_SCHED
-	struct bs_node                  bs_node;
+	struct bs_node			bs_node;
 #endif
 
 	u64				exec_start;

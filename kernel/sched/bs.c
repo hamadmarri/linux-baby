@@ -9,24 +9,40 @@
 #include "fair_numa.h"
 #include "bs.h"
 
-#define MIN_DEADLINE_NS	 590000ULL
+#define TIME_PERIOD 200000000ULL
+#define TO_COMPLETE 5000000ULL
 
+#define MIN_DEADLINE_NS	 590000ULL
 /* MIN_DEADLINE_NS * 2 */
 #define DEADLINE_NS	1180000ULL
 
 const s64 prio_factor[40] = {
- /* -20 */  -666666L, -633333L, -600000L, -566666L, -533333L,
- /* -15 */  -500000L, -466666L, -433333L, -400000L, -366666L,
- /* -10 */  -333333L, -300000L, -266666L, -233333L, -200000L,
- /*  -5 */  -166666L, -133333L, -100000L, -66666L,  -33333L,
- /*   0 */   0L,       33333L,   66666L,   100000L,  133333L,
- /*   5 */   166666L,  200000L,  233333L,  266666L,  300000L,
- /*  10 */   333333L,  366666L,  400000L,  433333L,  466666L,
- /*  15 */   500000L,  533333L,  566666L,  600000L,  633333L
+ /* -20 */  -1080000L, -980000L, -880000L, -780000L, -680000L,
+ /* -15 */   -580000L, -480000L, -380000L, -280000L, -180000L,
+ /* -10 */    -80000L,  -79000L,  -78000L,  -77000L,  -76000L,
+ /*  -5 */    -75000L,  -74000L,  -73000L,  -72000L,  -71000L,
+ /*   0 */         0L, 1080000L, 1090000L, 1100000L, 1110000L,
+ /*   5 */   1120000L, 1130000L, 1140000L, 1150000L, 1160000L,
+ /*  10 */   1170000L, 1180000L, 1190000L, 1200000L, 1210000L,
+ /*  15 */   1220000L, 1230000L, 1240000L, 1250000L, 1260000L
 };
 
 #define YIELD_MARK(bsn)		((bsn)->deadline |= 0x8000000000000000ULL)
 #define YIELD_UNMARK(bsn)	((bsn)->deadline &= 0x7FFFFFFFFFFFFFFFULL)
+
+static inline void
+calc_bursts(struct sched_entity *se, u64 burst, u64 now)
+{
+	struct bs_node *bsn = &se->bs_node;
+
+	if ((s64) now - bsn->start_time >= TIME_PERIOD) {
+		bsn->start_time = now;
+		bsn->prev_bursts = bsn->bursts;
+		bsn->bursts = 0ULL;
+	}
+
+	bsn->bursts += burst;
+}
 
 static inline u64
 calc_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -69,6 +85,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->exec_start = now;
 	curr->sum_exec_runtime += delta_exec;
 
+	calc_bursts(curr, delta_exec, now);
 	if (reached_deadline(cfs_rq, curr))
 		curr->bs_node.deadline = calc_deadline(cfs_rq, curr);
 }
@@ -85,6 +102,30 @@ static inline bool
 entity_before(struct bs_node *a, struct bs_node *b)
 {
 	return (s64)(a->deadline - b->deadline) < 0;
+}
+
+static inline bool
+can_resched_curr(struct sched_entity *curr)
+{
+	struct bs_node *bsn = &curr->bs_node;
+	u64 bursts = bsn->prev_bursts;
+	u64 curr_bursts = bsn->bursts;
+
+	if (!bursts)
+		return true;
+	else if ((s64)(curr_bursts - bursts) >= 0)
+		return true;
+	else if ((s64)(bursts - (curr_bursts + TO_COMPLETE)) > 0)
+		return true;
+
+	return false;
+}
+
+static inline void
+try_resched_curr(struct rq *rq, struct sched_entity *curr)
+{
+	if (can_resched_curr(curr))
+		resched_curr(rq);
 }
 
 #ifdef CONFIG_SCHED_HRTICK
@@ -125,6 +166,9 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 	if (rq->cfs.h_nr_running < 2)
 		return;
 
+	if (!can_resched_curr(curr))
+		return;
+
 	next = pick_next_entity(&rq->cfs, NULL);
 
 	if (!next)
@@ -154,7 +198,7 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 		if (entity_before(&next->bs_node, c_bsn)) {
 			// if n1
 			if (DIFF_DL(curr, next) - MIN_DEADLINE_NS > 0)
-				resched_curr(rq);
+				try_resched_curr(rq, curr);
 			// if n2
 			else
 				hrtick_start(rq, cd);
@@ -177,6 +221,7 @@ static void hrtick_update(struct rq *rq)
 	if (!hrtick_enabled_fair(rq) || curr->sched_class != &fair_sched_class)
 		return;
 
+	printk_once("****************************** hrtick_start_fair");
 	hrtick_start_fair(rq, curr);
 }
 #else /* !CONFIG_SCHED_HRTICK */
@@ -524,7 +569,7 @@ static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	if (pick_next_entity(cfs_rq, curr) != curr)
-		resched_curr(rq_of(cfs_rq));
+		try_resched_curr(rq_of(cfs_rq), curr);
 }
 
 static void
@@ -538,7 +583,7 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	 * validating it and just reschedule.
 	 */
 	if (queued) {
-		resched_curr(rq_of(cfs_rq));
+		try_resched_curr(rq_of(cfs_rq), curr);
 		return;
 	}
 
@@ -591,7 +636,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	return;
 
 preempt:
-	resched_curr(rq);
+	try_resched_curr(rq, se);
 }
 
 #ifdef CONFIG_SMP
@@ -857,6 +902,9 @@ static void task_fork_fair(struct task_struct *p)
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
+
+	se->bs_node.start_time = rq_clock_task(rq);
+	se->bs_node.prev_bursts = 0;
 
 	cfs_rq = task_cfs_rq(current);
 
