@@ -110,8 +110,11 @@ can_resched_curr(struct sched_entity *curr)
 	struct bs_node *bsn = &curr->bs_node;
 	u64 bursts = bsn->prev_bursts;
 	u64 curr_bursts = bsn->bursts;
+	u64 delta = 25000000ULL;
 
 	if (!bursts)
+		return true;
+	else if ((s64)(TIME_PERIOD - (bursts + delta)) <= 0)
 		return true;
 	else if ((s64)(curr_bursts - bursts) >= 0)
 		return true;
