@@ -2403,16 +2403,13 @@ extern const_debug unsigned int sysctl_sched_migration_cost;
  */
 static inline int hrtick_enabled(struct rq *rq)
 {
-	printk_once("********************* hrtick_enabled");
 	if (!cpu_active(cpu_of(rq)))
 		return 0;
-	printk_once("********************* hrtimer_is_hres_active");
 	return hrtimer_is_hres_active(&rq->hrtick_timer);
 }
 
 static inline int hrtick_enabled_fair(struct rq *rq)
 {
-	printk_once("********************* hrtick_enabled_fair");
 	if (!sched_feat(HRTICK))
 		return 0;
 	return hrtick_enabled(rq);
