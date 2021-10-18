@@ -9,8 +9,7 @@
 #include "fair_numa.h"
 #include "bs.h"
 
-#define TIME_PERIOD 200000000ULL
-#define TO_COMPLETE 5000000ULL
+#define TIME_PERIOD 5000000000ULL
 
 #define MIN_DEADLINE_NS	 590000ULL
 /* MIN_DEADLINE_NS * 2 */
@@ -69,6 +68,26 @@ reached_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	return (delta <= 0);
 }
 
+static inline void update_mlfq(struct sched_entity *se)
+{
+	struct bs_node *bsn = &se->bs_node;
+	u64 burst = bsn->prev_bursts;
+
+	if (!burst)
+		burst = bsn->bursts;
+
+	if (burst < 209000000ULL)
+		bsn->mlfq = MLFQ_HIGH_INTERACTIVE;
+	else if (burst < 523000000ULL)
+		bsn->mlfq = MLFQ_INTERACTIVE;
+	else if (burst < 1140000000ULL)
+		bsn->mlfq = MLFQ_NORMAL;
+	else if (burst < 2400000000ULL)
+		bsn->mlfq = MLFQ_LONG;
+	else
+		bsn->mlfq = MLFQ_BATCH;
+}
+
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
@@ -86,6 +105,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->sum_exec_runtime += delta_exec;
 
 	calc_bursts(curr, delta_exec, now);
+	update_mlfq(curr);
 	if (reached_deadline(cfs_rq, curr))
 		curr->bs_node.deadline = calc_deadline(cfs_rq, curr);
 }
@@ -101,34 +121,12 @@ static void update_curr_fair(struct rq *rq)
 static inline bool
 entity_before(struct bs_node *a, struct bs_node *b)
 {
+	if (a->mlfq < b->mlfq)
+		return true;
+	else if (a->mlfq > b->mlfq)
+		return false;
+
 	return (s64)(a->deadline - b->deadline) < 0;
-}
-
-static inline bool
-can_resched_curr(struct sched_entity *curr)
-{
-	struct bs_node *bsn = &curr->bs_node;
-	u64 bursts = bsn->prev_bursts;
-	u64 curr_bursts = bsn->bursts;
-	u64 delta = 25000000ULL;
-
-	if (!bursts)
-		return true;
-	else if ((s64)(TIME_PERIOD - (bursts + delta)) <= 0)
-		return true;
-	else if ((s64)(curr_bursts - bursts) >= 0)
-		return true;
-	else if ((s64)(bursts - (curr_bursts + TO_COMPLETE)) > 0)
-		return true;
-
-	return false;
-}
-
-static inline void
-try_resched_curr(struct rq *rq, struct sched_entity *curr)
-{
-	if (can_resched_curr(curr))
-		resched_curr(rq);
 }
 
 #ifdef CONFIG_SCHED_HRTICK
@@ -169,9 +167,6 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 	if (rq->cfs.h_nr_running < 2)
 		return;
 
-	if (!can_resched_curr(curr))
-		return;
-
 	next = pick_next_entity(&rq->cfs, NULL);
 
 	if (!next)
@@ -201,7 +196,7 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
 		if (entity_before(&next->bs_node, c_bsn)) {
 			// if n1
 			if (DIFF_DL(curr, next) - MIN_DEADLINE_NS > 0)
-				try_resched_curr(rq, curr);
+				resched_curr(rq);
 			// if n2
 			else
 				hrtick_start(rq, cd);
@@ -295,6 +290,8 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 */
 	if (renorm && !curr)
 		se->bs_node.deadline = calc_deadline(cfs_rq, se);
+
+	update_mlfq(se);
 
 	account_entity_enqueue(cfs_rq, se);
 
@@ -567,11 +564,23 @@ static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 	set_next_entity(cfs_rq, se);
 }
 
-static void
+static inline bool used_burst(struct sched_entity *curr)
+{
+	struct bs_node *bsn = &curr->bs_node;
+	s64 delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
+	u64 ideal_exec = DEADLINE_NS * ((u64) bsn->mlfq);
+
+	if (bsn->mlfq == MLFQ_HIGH_INTERACTIVE)
+		return true;
+
+	return (s64)(delta_exec - ideal_exec) >= 0;
+}
+
+static inline void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	if (pick_next_entity(cfs_rq, curr) != curr)
-		try_resched_curr(rq_of(cfs_rq), curr);
+	if (used_burst(curr) && pick_next_entity(cfs_rq, curr) != curr)
+		resched_curr(rq_of(cfs_rq));
 }
 
 static void
@@ -585,7 +594,7 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	 * validating it and just reschedule.
 	 */
 	if (queued) {
-		try_resched_curr(rq_of(cfs_rq), curr);
+		resched_curr(rq_of(cfs_rq));
 		return;
 	}
 
@@ -600,6 +609,8 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	if (cfs_rq->nr_running > 1)
 		check_preempt_tick(cfs_rq, curr);
 }
+
+#define SAME_LQ(a, b) ((a)->bs_node.mlfq == (b)->bs_node.mlfq)
 
 static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 {
@@ -632,13 +643,15 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 
 	update_curr(cfs_rq_of(se));
 
-	if (entity_before(&wse->bs_node, &se->bs_node))
+	if (SAME_LQ(se, wse) && used_burst(se))
+		goto preempt;
+	else if (entity_before(&wse->bs_node, &se->bs_node))
 		goto preempt;
 
 	return;
 
 preempt:
-	try_resched_curr(rq, se);
+	resched_curr(rq);
 }
 
 #ifdef CONFIG_SMP

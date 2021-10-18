@@ -3956,6 +3956,11 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.prev_sum_exec_runtime	= 0;
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
+
+#ifdef CONFIG_BS_SCHED
+	p->se.bs_node.mlfq		= MLFQ_HIGH_INTERACTIVE;
+#endif
+
 	INIT_LIST_HEAD(&p->se.group_node);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -8996,7 +9001,7 @@ void __init sched_init(void)
 	wait_bit_init();
 
 #ifdef CONFIG_BS_SCHED
-	printk(KERN_INFO "Baby CPU scheduler (dl) v5.14 by Hamad Al Marri.");
+	printk(KERN_INFO "Baby CPU scheduler (mlfq) v5.14 by Hamad Al Marri.");
 #endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED

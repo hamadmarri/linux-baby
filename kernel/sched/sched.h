@@ -92,6 +92,14 @@ struct cpuidle_state;
 #define TASK_ON_RQ_QUEUED	1
 #define TASK_ON_RQ_MIGRATING	2
 
+#ifdef CONFIG_BS_SCHED			// in range of 5s
+#define MLFQ_HIGH_INTERACTIVE	1	//   0ms - 209ms
+#define MLFQ_INTERACTIVE	2	// 210ms - 523ms
+#define MLFQ_NORMAL		4	// 524ms - 1.14s
+#define MLFQ_LONG		8	// 1.15s - 2.4s
+#define MLFQ_BATCH		16	//  2.5s - 5s
+#endif
+
 extern __read_mostly int scheduler_running;
 
 extern unsigned long calc_load_update;

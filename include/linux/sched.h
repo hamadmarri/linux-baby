@@ -466,6 +466,7 @@ struct sched_statistics {
 struct bs_node {
 	struct bs_node*	next;
 	struct bs_node*	prev;
+	unsigned int	mlfq;
 	u64		deadline;
 	u64		prev_bursts;
 	u64		bursts;
