@@ -912,22 +912,30 @@ static void task_fork_fair(struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *curr, *se = &p->se;
+	struct bs_node *se_bsn = &se->bs_node;
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
 
-	se->bs_node.start_time = rq_clock_task(rq);
-	se->bs_node.prev_bursts = 0;
+	se_bsn->start_time = rq_clock_task(rq);
+	se_bsn->prev_bursts = 0;
+	se_bsn->mlfq = MLFQ_HIGH_INTERACTIVE;
 
 	cfs_rq = task_cfs_rq(current);
 
-	se->bs_node.deadline = calc_deadline(cfs_rq, se);
+	se_bsn->deadline = calc_deadline(cfs_rq, se);
 
 	curr = cfs_rq->curr;
-	if (curr)
+	if (curr) {
 		update_curr(cfs_rq);
+
+		se_bsn->start_time  = curr->bs_node.start_time;
+		se_bsn->prev_bursts = curr->bs_node.prev_bursts;
+		se_bsn->bursts      = curr->bs_node.bursts;
+		se_bsn->mlfq        = curr->bs_node.mlfq;
+	}
 
 	rq_unlock(rq, &rf);
 }
