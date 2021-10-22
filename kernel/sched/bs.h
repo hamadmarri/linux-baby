@@ -147,3 +147,18 @@ static unsigned int get_rr_interval_fair(struct rq *rq, struct task_struct *task
 {
 	return 0;
 }
+
+#ifdef CONFIG_SCHED_DEBUG
+#define for_each_leaf_cfs_rq_safe(rq, cfs_rq, pos)	\
+		for (cfs_rq = &rq->cfs, pos = NULL; cfs_rq; cfs_rq = pos)
+
+void print_cfs_stats(struct seq_file *m, int cpu)
+{
+	struct cfs_rq *cfs_rq, *pos;
+
+	rcu_read_lock();
+	for_each_leaf_cfs_rq_safe(cpu_rq(cpu), cfs_rq, pos)
+		print_cfs_rq(m, cpu, cfs_rq);
+	rcu_read_unlock();
+}
+#endif

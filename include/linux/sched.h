@@ -466,7 +466,24 @@ struct sched_statistics {
 struct bs_node {
 	struct bs_node*                 next;
 	struct bs_node*                 prev;
+	unsigned int			task_type;
 	u64				vruntime;
+	u64				deadline;
+
+	u64				prev_wait_time;
+	u64				wait_time;
+	unsigned int			nr_sleeps;
+
+	/* virtual finishing time */
+	u64				vft;
+	u64				prev_burst;
+	u64				curr_burst;
+	u64				burst;
+
+	struct bs_node			*parent;
+	unsigned int			nr_forks;
+	unsigned int			nr_exited_children;
+	unsigned int			nr_heavy_children;
 };
 #endif
 

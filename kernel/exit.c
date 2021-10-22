@@ -660,12 +660,30 @@ static void forget_original_parent(struct task_struct *father,
  */
 static void exit_notify(struct task_struct *tsk, int group_dead)
 {
+#ifdef CONFIG_BS_SCHED
+#define LES(a, b) ((s64)((a) - (b)) < 0)
+	struct bs_node *bsn = &tsk->se.bs_node;
+	u64 _hrrn; //, life_time;
+	//u64 now = sched_clock();
+#endif
 	bool autoreap;
 	struct task_struct *p, *n;
 	LIST_HEAD(dead);
 
 	write_lock_irq(&tasklist_lock);
 	forget_original_parent(tsk, &dead);
+
+#ifdef CONFIG_BS_SCHED
+	if (bsn->parent) {
+		bsn->parent->nr_exited_children++;
+
+		_hrrn = (bsn->wait_time + bsn->vruntime) / (bsn->vruntime | 1);
+		//life_time = now - tsk->start_time;
+
+		if (LES(_hrrn, 3ULL)) // && LES(life_time, 3000000000ULL))
+			bsn->parent->nr_heavy_children++;
+	}
+#endif
 
 	if (group_dead)
 		kill_orphaned_pgrp(tsk->group_leader, NULL);

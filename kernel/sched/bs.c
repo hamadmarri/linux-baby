@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Basic Scheduler (BS) Class (SCHED_NORMAL/SCHED_BATCH)
+ * TT Scheduler Class (SCHED_NORMAL/SCHED_BATCH)
  *
  *  Copyright (C) 2021, Hamad Al Marri <hamad.s.almarri@gmail.com>
  */
@@ -9,14 +9,174 @@
 #include "fair_numa.h"
 #include "bs.h"
 
-u64 sched_granularity = 590000ULL;
+unsigned int __read_mostly interactive_hrrn	= 12U;
+unsigned int __read_mostly rt_wait_delta	= 800000U;
+unsigned int __read_mostly rt_burst_delta	= 2000000U;
+unsigned int __read_mostly rt_burst_max		= 4000000U;
+
+#define DEADLINE_NS    1180000ULL
 
 #define HZ_PERIOD (1000000000 / HZ)
 #define RACE_TIME 40000000
 #define FACTOR (RACE_TIME / HZ_PERIOD)
 
-#define YIELD_MARK(bsn)		((bsn)->vruntime |= 0x8000000000000000ULL)
-#define YIELD_UNMARK(bsn)	((bsn)->vruntime &= 0x7FFFFFFFFFFFFFFFULL)
+#define YIELD_MARK(bsn)		((bsn)->deadline |= 0x8000000000000000ULL)
+#define YIELD_UNMARK(bsn)	((bsn)->deadline &= 0x7FFFFFFFFFFFFFFFULL)
+
+#define IS_UNKNOWN(bsn)		((bsn)->task_type == TT_UNKNOWN)
+#define IS_INTERACTIVE(bsn)	((bsn)->task_type == TT_INTERACTIVE)
+#define IS_REALTIME(bsn)	((bsn)->task_type == TT_REALTIME)
+#define IS_CPU_BOUND(bsn)	((bsn)->task_type == TT_CPU_BOUND)
+#define IS_COMPILING(bsn)	((bsn)->task_type == TT_COMPILING)
+#define IS_BATCH(bsn)		((bsn)->task_type == TT_BATCH)
+
+/* if the parent task is not compiling */
+#define IS_COMPILING_ROOT(bsn)	((bsn)->parent && !IS_COMPILING((bsn)->parent))
+
+#define GEQ(a, b) ((s64)((a) - (b)) >= 0)	// is a >= b
+#define GRT(a, b) ((s64)((a) - (b)) > 0)	// is a >  b
+#define LEQ(a, b) ((s64)((a) - (b)) <= 0)	// is a <= b
+#define LES(a, b) ((s64)((a) - (b)) < 0)	// is a <  b
+#define EQ(a, b) ((s64)((a) - (b)) == 0)	// is a == b
+
+#define EQ_D(a, b, d) (LEQ(a, b + d) && GEQ(a, b - d))
+
+static inline u64 hrrn(struct bs_node *bsn)
+{
+	return (bsn->wait_time + bsn->vruntime) / (bsn->vruntime | 1);
+}
+
+static inline bool is_interactive(struct bs_node *bsn, u64 now, u64 _hrrn)
+{
+	u64 wait;
+
+	if (LES(_hrrn, interactive_hrrn))
+		return false;
+
+	wait = now - se_of(bsn)->exec_start;
+	if (wait && EQ_D(wait, bsn->prev_wait_time, rt_wait_delta))
+		return false;
+
+	return true;
+}
+
+static inline bool is_realtime(struct bs_node *bsn, u64 now)
+{
+	u64 life_time, wait;
+
+	// it has slept at least once
+	if (bsn->nr_sleeps <= 1)
+		return false;
+
+	// the life time is not short ( > second)
+	life_time = now - task_of(se_of(bsn))->start_time;
+	if (LES(life_time, 1000000000ULL))
+		return false;
+
+	/* it has relatively equal sleeping/waiting times
+	 * (ex. it sleeps for ~10ms and run repeatedly)
+	 */
+	wait = now - se_of(bsn)->exec_start;
+	if (wait && !EQ_D(wait, bsn->prev_wait_time, rt_wait_delta))
+		return false;
+
+	// bursts before sleep are relatively equal (delta 8ms)
+	if (!EQ_D(bsn->burst, bsn->prev_burst, rt_burst_delta))
+		return false;
+
+	// burst before sleep is <= 50ms
+	if (LEQ(bsn->burst, rt_burst_max) &&
+	    LEQ(bsn->curr_burst, rt_burst_max))
+		return true;
+
+	return false;
+}
+
+static inline bool is_cpu_bound(struct bs_node *bsn)
+{
+	return (GEQ(bsn->curr_burst, 1000000000ULL));
+}
+
+static inline bool is_batch(struct bs_node *bsn, u64 now, u64 _hrrn)
+{
+	u64 life_time;
+
+	// the life time is not short ( > second)
+	life_time = now - task_of(se_of(bsn))->start_time;
+	if (LES(life_time, 1000000000ULL))
+		return false;
+
+	// HRRN >= 50%
+	if (LES(_hrrn, 2ULL))
+		return true;
+
+	return false;
+}
+
+static inline bool is_compiling(struct bs_node *bsn)
+{
+	struct bs_node *parent = bsn->parent;
+	unsigned int heavy_precent; //, running_children;
+
+	// if parent is init, then no need
+	if (task_of(se_of(bsn))->pid <= 1)
+		return false;
+
+	// total number of forks >= nrcpu
+	if (parent->nr_forks < num_online_cpus())
+		return false;
+
+	// at least nrcpu of the parent children are still running
+	//running_children = (parent->nr_forks - 1) - parent->nr_exited_children;
+	//if (running_children < num_online_cpus())
+		//return false;
+
+	// (nr_children_heavy) / (total number of forks) >= 60%
+	heavy_precent = parent->nr_heavy_children * 100;
+	heavy_precent /= parent->nr_forks;
+	if (heavy_precent < 60)
+		return false;
+
+	// (total number of forks) / (nr_children_exited) is = floor(1)
+	if (!parent->nr_exited_children)
+		return false;
+
+	if (parent->nr_forks / parent->nr_exited_children > 1)
+		return false;
+
+	//printk("*********** %s (%d) nr_forks:%d nr_exited_children:%d nr_heavy_children:%d",
+		//task_of(se_of(bsn))->comm,
+		//task_of(se_of(bsn))->pid,
+		//parent->nr_forks,
+		//parent->nr_exited_children,
+		//parent->nr_heavy_children);
+
+	return true;
+}
+
+//struct task_struct *p = task_of(se_of(bsn));
+//bool name = (strcmp(p->comm, "multimedia.sh") == 0);
+static void detect_type(struct bs_node *bsn, u64 now)
+{
+	unsigned int new_type = TT_UNKNOWN;
+	u64 _hrrn;
+
+	if (IS_COMPILING(bsn))
+		return;
+
+	_hrrn = hrrn(bsn);
+
+	if (is_realtime(bsn, now))
+		new_type = TT_REALTIME;
+	else if (is_cpu_bound(bsn))
+		new_type = TT_CPU_BOUND;
+	else if (is_batch(bsn, now, _hrrn))
+		new_type = TT_BATCH;
+	else if (is_interactive(bsn, now, _hrrn))
+		new_type = TT_INTERACTIVE;
+
+	bsn->task_type = new_type;
+}
 
 static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 {
@@ -35,6 +195,41 @@ static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 	return delta + prio_diff;
 }
 
+const s64 prio_factor[40] = {
+ /* -20 */  -1080000L, -980000L, -880000L, -780000L, -680000L,
+ /* -15 */   -580000L, -480000L, -380000L, -280000L, -180000L,
+ /* -10 */    -80000L,  -79000L,  -78000L,  -77000L,  -76000L,
+ /*  -5 */    -75000L,  -74000L,  -73000L,  -72000L,  -71000L,
+ /*   0 */         0L, 1080000L, 1090000L, 1100000L, 1110000L,
+ /*   5 */   1120000L, 1130000L, 1140000L, 1150000L, 1160000L,
+ /*  10 */   1170000L, 1180000L, 1190000L, 1200000L, 1210000L,
+ /*  15 */   1220000L, 1230000L, 1240000L, 1250000L, 1260000L
+};
+
+static inline u64
+calc_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	struct task_struct *p = task_of(se);
+	s64 prio_diff;
+	u64 now = rq_clock(rq_of(cfs_rq));
+	u64 deadline = now + DEADLINE_NS;
+
+	if (PRIO_TO_NICE(p->prio) == 0)
+		return deadline;
+
+	prio_diff = prio_factor[PRIO_TO_NICE(p->prio) + 20];
+
+	return deadline + prio_diff;
+}
+
+static inline bool
+reached_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	u64 now = rq_clock(rq_of(cfs_rq));
+	s64 delta = se->bs_node.deadline - now;
+	return (delta <= 0);
+}
+
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
@@ -51,8 +246,14 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->exec_start = now;
 	curr->sum_exec_runtime += delta_exec;
 
+	curr->bs_node.curr_burst += delta_exec;
+
 	curr->bs_node.vruntime += convert_to_vruntime(delta_exec, curr);
-	cfs_rq->min_vruntime = curr->bs_node.vruntime;
+
+	detect_type(&curr->bs_node, now);
+
+	if (reached_deadline(cfs_rq, curr))
+		curr->bs_node.deadline = calc_deadline(cfs_rq, curr);
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -61,113 +262,36 @@ static void update_curr_fair(struct rq *rq)
 }
 
 /**
- * Does a have smaller vruntime than b?
+ * Does a belong to higher prio task type than b?
+ * If same type, does a have smaller deadline than b?
  */
 static inline bool
 entity_before(struct bs_node *a, struct bs_node *b)
 {
-	return (s64)(a->vruntime - b->vruntime) < 0;
-}
+	if (a->task_type == b->task_type)
+		return (s64)(a->deadline - b->deadline) < 0;
 
-static inline s64
-diff_vrt(struct sched_entity *a, struct sched_entity *b)
-{
-	return (s64)(a->bs_node.vruntime - b->bs_node.vruntime);
-}
+	// they are not equal at this point
+	if (IS_REALTIME(a))
+		return true;
+	else if (IS_REALTIME(b))
+		return false;
 
-#ifdef CONFIG_SCHED_HRTICK
-static struct sched_entity *
-pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr);
-
-/*
- *         cs         g
- *         |   gran   |
- *         |<-------->|
- *  |n1    |      |n2 |  |n3     |n4
- *         |          |
- *         |  |c1     |
- *         |          |      |c2
- *         |          |
- *
- * n1 & c1: hr(g - c1)
- * n1 & c2: resched_curr
- *
- * n2 & c1: hr(g - c1)
- * n2 & c2: resched_curr
- *
- * n3 & c1: hr(n3 - c1)
- * n3 & c2: resched_curr
- *
- * n4 & c1: hr(n4 - c1)
- * n4 & c2: hr(n4 - c2)
- */
-static void hrtick_start_fair(struct rq *rq, struct task_struct *pcurr)
-{
-	struct sched_entity *curr = &pcurr->se;
-	struct sched_entity *next = pick_next_entity(&rq->cfs, curr);
-	u64 curr_ran;
-	s64 delta;
-
-	if (rq->cfs.h_nr_running < 2 || curr == next)
-		return;
-
-	curr_ran = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
-	delta = sched_granularity - curr_ran;
-
-	// if c1
-	if (delta > 0) {
-		// if n1
-		if (entity_before(&next->bs_node, &curr->bs_node)) {
-			if (diff_vrt(curr, next) - sched_granularity < 0)
-				hrtick_start(rq, delta);
-			else
-				resched_curr(rq);
-		}
-		// if n2
-		else if (diff_vrt(next, curr) - delta < 0) {
-			hrtick_start(rq, delta);
-		}
-		// if n3 or n4
-		else {
-			hrtick_start(rq, diff_vrt(next, curr));
-		}
+	if (a->task_type <= TT_UNKNOWN) {
+		// both either interactive or unknown
+		if (b->task_type <= TT_UNKNOWN)
+			return (s64)(a->deadline - b->deadline) < 0;
+		else
+			return true;
 	}
-	// if c2
-	else {
-		// if n1, n2, or n3
-		if (entity_before(&next->bs_node, &curr->bs_node)) {
-			resched_curr(rq);
-		}
-		// if n4
-		else {
-			hrtick_start(rq, diff_vrt(next, curr));
-		}
-	}
-}
 
-/*
- * called from enqueue/dequeue and updates the hrtick when the
- * current task is from our class.
- */
-static void hrtick_update(struct rq *rq)
-{
-	struct task_struct *curr = rq->curr;
+	// we know a is cpu_bound and above
+	if (b->task_type <= TT_UNKNOWN)
+		return false;
 
-	if (!hrtick_enabled_fair(rq) || curr->sched_class != &fair_sched_class)
-		return;
-
-	hrtick_start_fair(rq, curr);
+	// both are cpu_bound and above
+	return (s64)(a->deadline - b->deadline) < 0;
 }
-#else /* !CONFIG_SCHED_HRTICK */
-static inline void
-hrtick_start_fair(struct rq *rq, struct task_struct *curr)
-{
-}
-
-static inline void hrtick_update(struct rq *rq)
-{
-}
-#endif
 
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
@@ -214,26 +338,33 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
+	struct bs_node *bsn = &se->bs_node;
 	bool curr = cfs_rq->curr == se;
 	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
+	bool wakeup = (flags & ENQUEUE_WAKEUP);
+	u64 now = rq_clock_task(rq_of(cfs_rq));
+	u64 wait;
 
-	/*
-	 * If we're the current task, we must renormalise before calling
-	 * update_curr().
-	 */
-	if (renorm && curr)
-		se->bs_node.vruntime = cfs_rq->min_vruntime;
+	if (wakeup) {
+		wait = now - se->exec_start;
+		bsn->wait_time += wait;
+		detect_type(bsn, now);
+
+		bsn->prev_wait_time = wait;
+	} else {
+		detect_type(bsn, now);
+	}
 
 	update_curr(cfs_rq);
 
 	/*
-	 * Otherwise, renormalise after, such that we're placed at the current
+	 * Renormalise, such that we're placed at the current
 	 * moment in time, instead of some random moment in the past. Being
 	 * placed in the past could significantly boost this task to the
 	 * fairness detriment of existing tasks.
 	 */
 	if (renorm && !curr)
-		se->bs_node.vruntime = cfs_rq->min_vruntime;
+		se->bs_node.deadline = calc_deadline(cfs_rq, se);
 
 	account_entity_enqueue(cfs_rq, se);
 
@@ -246,6 +377,19 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 static void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
+	struct bs_node *bsn = &se->bs_node;
+	bool sleep = (flags & DEQUEUE_SLEEP);
+
+	if (sleep) {
+		bsn->nr_sleeps++;
+		bsn->prev_burst = bsn->burst;
+		bsn->burst = bsn->curr_burst;
+		bsn->curr_burst = 0;
+
+		if (IS_CPU_BOUND(bsn))
+			bsn->task_type = TT_UNKNOWN;
+	}
+
 	update_curr(cfs_rq);
 
 	if (se != cfs_rq->curr)
@@ -269,7 +413,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	add_nr_running(rq, 1);
-	hrtick_update(rq);
 }
 
 static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
@@ -284,7 +427,6 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	cfs_rq->idle_h_nr_running -= idle_h_nr_running;
 
 	sub_nr_running(rq, 1);
-	hrtick_update(rq);
 }
 
 static void yield_task_fair(struct rq *rq)
@@ -331,7 +473,7 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	cfs_rq->curr = se;
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
 
-	cfs_rq->min_vruntime = se->bs_node.vruntime;
+	se->bs_node.deadline = calc_deadline(cfs_rq, se);
 }
 
 static struct sched_entity *
@@ -389,9 +531,6 @@ done: __maybe_unused;
 	 */
 	list_move(&p->se.group_node, &rq->cfs_tasks);
 #endif
-
-	if (hrtick_enabled_fair(rq))
-		hrtick_start_fair(rq, p);
 
 	return p;
 
@@ -611,7 +750,7 @@ can_migrate_task(struct task_struct *p, int dst_cpu, struct rq *src_rq)
 	return 1;
 }
 
-static void pull_from(struct rq *this_rq,
+static void pull_from(struct rq *dist_rq,
 		      struct rq *src_rq,
 		      struct rq_flags *src_rf,
 		      struct task_struct *p)
@@ -620,49 +759,50 @@ static void pull_from(struct rq *this_rq,
 
 	// detach task
 	deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
-	set_task_cpu(p, cpu_of(this_rq));
+	set_task_cpu(p, cpu_of(dist_rq));
 
 	// unlock src rq
 	rq_unlock(src_rq, src_rf);
 
-	// lock this rq
-	rq_lock(this_rq, &rf);
-	update_rq_clock(this_rq);
+	// lock dist rq
+	rq_lock(dist_rq, &rf);
+	update_rq_clock(dist_rq);
 
-	activate_task(this_rq, p, ENQUEUE_NOCLOCK);
-	check_preempt_curr(this_rq, p, 0);
+	activate_task(dist_rq, p, ENQUEUE_NOCLOCK);
+	check_preempt_curr(dist_rq, p, 0);
 
-	// unlock this rq
-	rq_unlock(this_rq, &rf);
+	// unlock dist rq
+	rq_unlock(dist_rq, &rf);
 
 	local_irq_restore(src_rf->flags);
 }
 
-static int move_task(struct rq *this_rq, struct rq *src_rq,
+static int move_task(struct rq *dist_rq, struct rq *src_rq,
 			struct rq_flags *src_rf)
 {
 	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
 	struct task_struct *p;
 	struct bs_node *bsn = src_cfs_rq->head;
-	int moved = 0;
 
 	while (bsn) {
 		p = task_of(se_of(bsn));
-		if (can_migrate_task(p, cpu_of(this_rq), src_rq)) {
-			pull_from(this_rq, src_rq, src_rf, p);
-			moved = 1;
-			break;
+		if (can_migrate_task(p, cpu_of(dist_rq), src_rq)) {
+			pull_from(dist_rq, src_rq, src_rf, p);
+			return 1;
 		}
 
 		bsn = bsn->next;
 	}
 
-	if (!moved) {
-		rq_unlock(src_rq, src_rf);
-		local_irq_restore(src_rf->flags);
-	}
+	/*
+	 * Here we know we have not migrated any task,
+	 * thus, we need to unlock and return 0
+	 * Note: the pull_from does the unlocking for us.
+	 */
+	rq_unlock(src_rq, src_rf);
+	local_irq_restore(src_rf->flags);
 
-	return moved;
+	return 0;
 }
 
 static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
@@ -820,17 +960,60 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 static void task_fork_fair(struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq;
-	struct sched_entity *curr;
+	struct sched_entity *curr, *se = &p->se;
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
+	struct bs_node *bsn = &p->se.bs_node;
+
+	bsn->task_type = TT_UNKNOWN;
+	bsn->vruntime = 0;
+	bsn->deadline = 0;
+	bsn->prev_wait_time = 0;
+	bsn->wait_time = 0;
+	bsn->nr_sleeps = 0;
+	bsn->vft = 0;
+	bsn->prev_burst = 0;
+	bsn->burst = 0;
+	bsn->curr_burst = 0;
+	bsn->parent = NULL;
+	bsn->nr_forks = 0;
+	bsn->nr_exited_children = 0;
+	bsn->nr_heavy_children = 0;
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
 
 	cfs_rq = task_cfs_rq(current);
+
+	se->bs_node.deadline = calc_deadline(cfs_rq, se);
+
 	curr = cfs_rq->curr;
-	if (curr)
+	if (curr) {
 		update_curr(cfs_rq);
+		curr->bs_node.nr_forks++;
+		bsn->parent = &curr->bs_node;
+
+		// if parent is already compiling
+		if (IS_COMPILING(bsn->parent)) {
+			// inherit compiling type from parent
+			bsn->task_type = TT_COMPILING;
+
+			if (IS_COMPILING_ROOT(bsn->parent) && !is_compiling(bsn)) {
+				/*
+				 * in case the parent is the root of
+				 * compiling tasks, and this child
+				 * detected that it is not compiling
+				 * any more. So we need to reset types
+				 */
+				bsn->parent->task_type = TT_UNKNOWN;
+				bsn->task_type = TT_UNKNOWN;
+			}
+		} else if (is_compiling(bsn)) {
+			/* parent is not compiling, set both */
+			bsn->task_type = TT_COMPILING;
+			bsn->parent->task_type = TT_COMPILING;
+		}
+	}
 
 	rq_unlock(rq, &rf);
 }
