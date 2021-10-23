@@ -88,10 +88,9 @@
 #ifdef CONFIG_BS_SCHED
 #define TT_REALTIME	0
 #define TT_INTERACTIVE	1
-#define TT_UNKNOWN	2
+#define TT_NO_TYPE	2
 #define TT_CPU_BOUND	3
-#define TT_COMPILING	4
-#define TT_BATCH	5
+#define TT_BATCH	4
 #endif
 
 struct rq;

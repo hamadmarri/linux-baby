@@ -977,14 +977,12 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 #ifdef CONFIG_BS_SCHED
 #define PN_TT(F, S) SEQ_printf(m, "%-45s: %20s\n", #F, #S)
 
-	if (p->se.bs_node.task_type == TT_UNKNOWN)
-		PN_TT(task_type, UNKNOWN);
+	if (p->se.bs_node.task_type == TT_NO_TYPE)
+		PN_TT(task_type, NO_TYPE);
 	else if (p->se.bs_node.task_type == TT_INTERACTIVE)
 		PN_TT(task_type, INTERACTIVE);
 	else if (p->se.bs_node.task_type == TT_REALTIME)
 		PN_TT(task_type, REALTIME);
-	else if (p->se.bs_node.task_type == TT_COMPILING)
-		PN_TT(task_type, CPU_IO_BOUND);
 	else if (p->se.bs_node.task_type == TT_CPU_BOUND)
 		PN_TT(task_type, CPU_BOUND);
 	else if (p->se.bs_node.task_type == TT_BATCH)

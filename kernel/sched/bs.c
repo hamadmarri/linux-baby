@@ -9,7 +9,7 @@
 #include "fair_numa.h"
 #include "bs.h"
 
-unsigned int __read_mostly interactive_hrrn	= 12U;
+unsigned int __read_mostly interactive_hrrn	= 2U;
 unsigned int __read_mostly rt_wait_delta	= 800000U;
 unsigned int __read_mostly rt_burst_delta	= 2000000U;
 unsigned int __read_mostly rt_burst_max		= 4000000U;
@@ -23,22 +23,17 @@ unsigned int __read_mostly rt_burst_max		= 4000000U;
 #define YIELD_MARK(bsn)		((bsn)->deadline |= 0x8000000000000000ULL)
 #define YIELD_UNMARK(bsn)	((bsn)->deadline &= 0x7FFFFFFFFFFFFFFFULL)
 
-#define IS_UNKNOWN(bsn)		((bsn)->task_type == TT_UNKNOWN)
-#define IS_INTERACTIVE(bsn)	((bsn)->task_type == TT_INTERACTIVE)
 #define IS_REALTIME(bsn)	((bsn)->task_type == TT_REALTIME)
+#define IS_INTERACTIVE(bsn)	((bsn)->task_type == TT_INTERACTIVE)
+#define IS_NO_TYPE(bsn)		((bsn)->task_type == TT_NO_TYPE)
 #define IS_CPU_BOUND(bsn)	((bsn)->task_type == TT_CPU_BOUND)
-#define IS_COMPILING(bsn)	((bsn)->task_type == TT_COMPILING)
 #define IS_BATCH(bsn)		((bsn)->task_type == TT_BATCH)
-
-/* if the parent task is not compiling */
-#define IS_COMPILING_ROOT(bsn)	((bsn)->parent && !IS_COMPILING((bsn)->parent))
 
 #define GEQ(a, b) ((s64)((a) - (b)) >= 0)	// is a >= b
 #define GRT(a, b) ((s64)((a) - (b)) > 0)	// is a >  b
 #define LEQ(a, b) ((s64)((a) - (b)) <= 0)	// is a <= b
 #define LES(a, b) ((s64)((a) - (b)) < 0)	// is a <  b
 #define EQ(a, b) ((s64)((a) - (b)) == 0)	// is a == b
-
 #define EQ_D(a, b, d) (LEQ(a, b + d) && GEQ(a, b - d))
 
 static inline u64 hrrn(struct bs_node *bsn)
@@ -50,7 +45,7 @@ static inline bool is_interactive(struct bs_node *bsn, u64 now, u64 _hrrn)
 {
 	u64 wait;
 
-	if (LES(_hrrn, interactive_hrrn))
+	if (LES(_hrrn, (u64) interactive_hrrn))
 		return false;
 
 	wait = now - se_of(bsn)->exec_start;
@@ -60,31 +55,34 @@ static inline bool is_interactive(struct bs_node *bsn, u64 now, u64 _hrrn)
 	return true;
 }
 
-static inline bool is_realtime(struct bs_node *bsn, u64 now)
+static inline bool is_realtime(struct bs_node *bsn, u64 now, int flags)
 {
 	u64 life_time, wait;
 
 	// it has slept at least once
-	if (bsn->nr_sleeps <= 1)
+	if (!bsn->wait_time)
 		return false;
 
-	// the life time is not short ( > second)
+	// life time >= 0.5s
 	life_time = now - task_of(se_of(bsn))->start_time;
-	if (LES(life_time, 1000000000ULL))
+	if (LES(life_time, 500000000ULL))
 		return false;
 
-	/* it has relatively equal sleeping/waiting times
-	 * (ex. it sleeps for ~10ms and run repeatedly)
-	 */
-	wait = now - se_of(bsn)->exec_start;
-	if (wait && !EQ_D(wait, bsn->prev_wait_time, rt_wait_delta))
-		return false;
+	// don't check wait time for migrated tasks
+	if (!(flags & ENQUEUE_MIGRATED)) {
+		/* it has relatively equal sleeping/waiting times
+		 * (ex. it sleeps for ~10ms and run repeatedly)
+		 */
+		wait = now - se_of(bsn)->exec_start;
+		if (wait && !EQ_D(wait, bsn->prev_wait_time, rt_wait_delta))
+			return false;
+	}
 
-	// bursts before sleep are relatively equal (delta 8ms)
+	// bursts before sleep are relatively equal (delta 2ms)
 	if (!EQ_D(bsn->burst, bsn->prev_burst, rt_burst_delta))
 		return false;
 
-	// burst before sleep is <= 50ms
+	// burst before sleep is <= 4ms
 	if (LEQ(bsn->burst, rt_burst_max) &&
 	    LEQ(bsn->curr_burst, rt_burst_max))
 		return true;
@@ -94,86 +92,44 @@ static inline bool is_realtime(struct bs_node *bsn, u64 now)
 
 static inline bool is_cpu_bound(struct bs_node *bsn)
 {
-	return (GEQ(bsn->curr_burst, 1000000000ULL));
+	u64 _hrrn_percent;
+
+	if (!bsn->vruntime)
+		return false;
+
+	_hrrn_percent = bsn->vruntime * 100ULL;
+	_hrrn_percent /= bsn->wait_time + bsn->vruntime;
+
+	// HRRN >= 80%
+	return (GEQ(_hrrn_percent, 80ULL));
 }
 
-static inline bool is_batch(struct bs_node *bsn, u64 now, u64 _hrrn)
+static inline bool is_batch(struct bs_node *bsn, u64 _hrrn)
 {
-	u64 life_time;
-
-	// the life time is not short ( > second)
-	life_time = now - task_of(se_of(bsn))->start_time;
-	if (LES(life_time, 1000000000ULL))
-		return false;
-
-	// HRRN >= 50%
-	if (LES(_hrrn, 2ULL))
-		return true;
-
-	return false;
+	// HRRN < 50%
+	return (LES(_hrrn, 2ULL));
 }
 
-static inline bool is_compiling(struct bs_node *bsn)
+static void detect_type(struct bs_node *bsn, u64 now, int flags)
 {
-	struct bs_node *parent = bsn->parent;
-	unsigned int heavy_precent; //, running_children;
+	unsigned int new_type = TT_NO_TYPE;
+	u64 _hrrn = hrrn(bsn);
 
-	// if parent is init, then no need
-	if (task_of(se_of(bsn))->pid <= 1)
-		return false;
-
-	// total number of forks >= nrcpu
-	if (parent->nr_forks < num_online_cpus())
-		return false;
-
-	// at least nrcpu of the parent children are still running
-	//running_children = (parent->nr_forks - 1) - parent->nr_exited_children;
-	//if (running_children < num_online_cpus())
-		//return false;
-
-	// (nr_children_heavy) / (total number of forks) >= 60%
-	heavy_precent = parent->nr_heavy_children * 100;
-	heavy_precent /= parent->nr_forks;
-	if (heavy_precent < 60)
-		return false;
-
-	// (total number of forks) / (nr_children_exited) is = floor(1)
-	if (!parent->nr_exited_children)
-		return false;
-
-	if (parent->nr_forks / parent->nr_exited_children > 1)
-		return false;
-
-	//printk("*********** %s (%d) nr_forks:%d nr_exited_children:%d nr_heavy_children:%d",
-		//task_of(se_of(bsn))->comm,
-		//task_of(se_of(bsn))->pid,
-		//parent->nr_forks,
-		//parent->nr_exited_children,
-		//parent->nr_heavy_children);
-
-	return true;
-}
-
-//struct task_struct *p = task_of(se_of(bsn));
-//bool name = (strcmp(p->comm, "multimedia.sh") == 0);
-static void detect_type(struct bs_node *bsn, u64 now)
-{
-	unsigned int new_type = TT_UNKNOWN;
-	u64 _hrrn;
-
-	if (IS_COMPILING(bsn))
-		return;
-
-	_hrrn = hrrn(bsn);
-
-	if (is_realtime(bsn, now))
+	if (is_realtime(bsn, now, flags))
 		new_type = TT_REALTIME;
-	else if (is_cpu_bound(bsn))
-		new_type = TT_CPU_BOUND;
-	else if (is_batch(bsn, now, _hrrn))
-		new_type = TT_BATCH;
 	else if (is_interactive(bsn, now, _hrrn))
 		new_type = TT_INTERACTIVE;
+	else if (is_cpu_bound(bsn))
+		new_type = TT_CPU_BOUND;
+	else if (is_batch(bsn, _hrrn))
+		new_type = TT_BATCH;
+
+	if (new_type == TT_REALTIME) {
+		bsn->rt_sticky = 4;
+	} else if (IS_REALTIME(bsn) && bsn->rt_sticky) {
+		bsn->rt_sticky--;
+		return;
+	}
 
 	bsn->task_type = new_type;
 }
@@ -247,10 +203,8 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->sum_exec_runtime += delta_exec;
 
 	curr->bs_node.curr_burst += delta_exec;
-
 	curr->bs_node.vruntime += convert_to_vruntime(delta_exec, curr);
-
-	detect_type(&curr->bs_node, now);
+	detect_type(&curr->bs_node, now, 0);
 
 	if (reached_deadline(cfs_rq, curr))
 		curr->bs_node.deadline = calc_deadline(cfs_rq, curr);
@@ -277,19 +231,18 @@ entity_before(struct bs_node *a, struct bs_node *b)
 	else if (IS_REALTIME(b))
 		return false;
 
-	if (a->task_type <= TT_UNKNOWN) {
-		// both either interactive or unknown
-		if (b->task_type <= TT_UNKNOWN)
+	if (a->task_type <= TT_NO_TYPE) {
+		// both either interactive or no type
+		if (b->task_type <= TT_NO_TYPE)
 			return (s64)(a->deadline - b->deadline) < 0;
 		else
 			return true;
 	}
-
 	// we know a is cpu_bound and above
-	if (b->task_type <= TT_UNKNOWN)
+	else if (b->task_type <= TT_NO_TYPE)
 		return false;
 
-	// both are cpu_bound and above
+	// both are cpu_bound or batch
 	return (s64)(a->deadline - b->deadline) < 0;
 }
 
@@ -348,11 +301,11 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	if (wakeup) {
 		wait = now - se->exec_start;
 		bsn->wait_time += wait;
-		detect_type(bsn, now);
+		detect_type(bsn, now, flags);
 
 		bsn->prev_wait_time = wait;
 	} else {
-		detect_type(bsn, now);
+		detect_type(bsn, now, flags);
 	}
 
 	update_curr(cfs_rq);
@@ -381,13 +334,12 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	bool sleep = (flags & DEQUEUE_SLEEP);
 
 	if (sleep) {
-		bsn->nr_sleeps++;
 		bsn->prev_burst = bsn->burst;
 		bsn->burst = bsn->curr_burst;
 		bsn->curr_burst = 0;
 
 		if (IS_CPU_BOUND(bsn))
-			bsn->task_type = TT_UNKNOWN;
+			bsn->task_type = TT_BATCH;
 	}
 
 	update_curr(cfs_rq);
@@ -641,24 +593,6 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 {
 	update_curr(cfs_rq);
 
-#ifdef CONFIG_SCHED_HRTICK
-	/*
-	 * queued ticks are scheduled to match the slice, so don't bother
-	 * validating it and just reschedule.
-	 */
-	if (queued) {
-		resched_curr(rq_of(cfs_rq));
-		return;
-	}
-
-	/*
-	 * don't let the period tick interfere with the hrtick preemption
-	 */
-	if (!sched_feat(DOUBLE_TICK) &&
-			hrtimer_active(&rq_of(cfs_rq)->hrtick_timer))
-		return;
-#endif
-
 	if (cfs_rq->nr_running > 1)
 		check_preempt_tick(cfs_rq, curr);
 }
@@ -684,12 +618,6 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	 * is driven by the tick):
 	 */
 	if (unlikely(p->policy != SCHED_NORMAL) || !sched_feat(WAKEUP_PREEMPTION))
-		return;
-
-	/*
-	 * Lower priority tasks do not preempt higher ones
-	 */
-	if (p->prio > curr->prio)
 		return;
 
 	update_curr(cfs_rq_of(se));
@@ -965,20 +893,16 @@ static void task_fork_fair(struct task_struct *p)
 	struct rq_flags rf;
 	struct bs_node *bsn = &p->se.bs_node;
 
-	bsn->task_type = TT_UNKNOWN;
-	bsn->vruntime = 0;
-	bsn->deadline = 0;
-	bsn->prev_wait_time = 0;
-	bsn->wait_time = 0;
-	bsn->nr_sleeps = 0;
-	bsn->vft = 0;
-	bsn->prev_burst = 0;
-	bsn->burst = 0;
-	bsn->curr_burst = 0;
-	bsn->parent = NULL;
-	bsn->nr_forks = 0;
-	bsn->nr_exited_children = 0;
-	bsn->nr_heavy_children = 0;
+	bsn->task_type		= TT_NO_TYPE;
+	bsn->vruntime		= 0;
+	bsn->deadline		= 0;
+	bsn->prev_wait_time	= 0;
+	bsn->wait_time		= 0;
+	bsn->vft		= 0;
+	bsn->prev_burst		= 0;
+	bsn->burst		= 0;
+	bsn->curr_burst		= 0;
+	bsn->rt_sticky		= 0;
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
@@ -988,32 +912,8 @@ static void task_fork_fair(struct task_struct *p)
 	se->bs_node.deadline = calc_deadline(cfs_rq, se);
 
 	curr = cfs_rq->curr;
-	if (curr) {
+	if (curr)
 		update_curr(cfs_rq);
-		curr->bs_node.nr_forks++;
-		bsn->parent = &curr->bs_node;
-
-		// if parent is already compiling
-		if (IS_COMPILING(bsn->parent)) {
-			// inherit compiling type from parent
-			bsn->task_type = TT_COMPILING;
-
-			if (IS_COMPILING_ROOT(bsn->parent) && !is_compiling(bsn)) {
-				/*
-				 * in case the parent is the root of
-				 * compiling tasks, and this child
-				 * detected that it is not compiling
-				 * any more. So we need to reset types
-				 */
-				bsn->parent->task_type = TT_UNKNOWN;
-				bsn->task_type = TT_UNKNOWN;
-			}
-		} else if (is_compiling(bsn)) {
-			/* parent is not compiling, set both */
-			bsn->task_type = TT_COMPILING;
-			bsn->parent->task_type = TT_COMPILING;
-		}
-	}
 
 	rq_unlock(rq, &rf);
 }
