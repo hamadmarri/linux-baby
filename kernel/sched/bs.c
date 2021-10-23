@@ -179,16 +179,23 @@ calc_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 }
 
 static inline bool
-reached_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
+reached_deadline(struct bs_node *bsn, u64 now)
 {
-	u64 now = rq_clock(rq_of(cfs_rq));
-	s64 delta = se->bs_node.deadline - now;
+	s64 delta = bsn->deadline - now;
+	return (delta <= 0);
+}
+
+static inline bool
+reached_vft(struct bs_node *bsn, u64 now)
+{
+	s64 delta = bsn->vft - now;
 	return (delta <= 0);
 }
 
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
+	struct bs_node *bsn = &curr->bs_node;
 	u64 now = rq_clock_task(rq_of(cfs_rq));
 	u64 delta_exec;
 
@@ -202,12 +209,15 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->exec_start = now;
 	curr->sum_exec_runtime += delta_exec;
 
-	curr->bs_node.curr_burst += delta_exec;
-	curr->bs_node.vruntime += convert_to_vruntime(delta_exec, curr);
-	detect_type(&curr->bs_node, now, 0);
+	bsn->curr_burst += delta_exec;
+	bsn->vruntime += convert_to_vruntime(delta_exec, curr);
+	detect_type(bsn, now, 0);
 
-	if (reached_deadline(cfs_rq, curr))
-		curr->bs_node.deadline = calc_deadline(cfs_rq, curr);
+	if (reached_deadline(bsn, now))
+		bsn->deadline = calc_deadline(cfs_rq, curr);
+
+	if (IS_REALTIME(bsn) && reached_vft(bsn, now))
+		bsn->vft = now + bsn->burst;
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -215,35 +225,57 @@ static void update_curr_fair(struct rq *rq)
 	update_curr(cfs_rq_of(&rq->curr->se));
 }
 
+static inline bool
+higher_hrrn(struct bs_node *a, struct bs_node *b)
+{
+	return (s64)(hrrn(a) - hrrn(b)) > 0;
+}
+
 /**
- * Does a belong to higher prio task type than b?
- * If same type, does a have smaller deadline than b?
+ * Should `a` preempts `b`?
  */
 static inline bool
 entity_before(struct bs_node *a, struct bs_node *b)
 {
-	if (a->task_type == b->task_type)
-		return (s64)(a->deadline - b->deadline) < 0;
-
-	// they are not equal at this point
-	if (IS_REALTIME(a))
-		return true;
-	else if (IS_REALTIME(b))
+	if (IS_REALTIME(a)) {
+		if (IS_REALTIME(b))
+			return (s64)(a->vft - b->vft) <= 0;
+		else
+			return true;
+	}
+	else if (IS_REALTIME(b)) {
+		// a here is not rt
 		return false;
-
-	if (a->task_type <= TT_NO_TYPE) {
-		// both either interactive or no type
-		if (b->task_type <= TT_NO_TYPE)
+	}
+	else if (IS_INTERACTIVE(a)) {
+		if (IS_INTERACTIVE(b))
+			return higher_hrrn(a, b);
+		else if (IS_NO_TYPE(b))
 			return (s64)(a->deadline - b->deadline) < 0;
 		else
 			return true;
 	}
-	// we know a is cpu_bound and above
-	else if (b->task_type <= TT_NO_TYPE)
-		return false;
+	else if (IS_INTERACTIVE(b)) {
+		if (IS_NO_TYPE(a))
+			return (s64)(a->deadline - b->deadline) < 0;
+		else
+			return false;
+	}
+	else if (IS_NO_TYPE(a) || IS_NO_TYPE(b)) {
+		return (s64)(a->deadline - b->deadline) < 0;
+	}
+	else if (IS_CPU_BOUND(a)) {
+		if (IS_CPU_BOUND(b))
+			return higher_hrrn(a, b);
+		else
+			return (s64)(a->deadline - b->deadline) < 0;
+	}
+	else if (IS_CPU_BOUND(b)) {
+		return (s64)(a->deadline - b->deadline) < 0;
+	}
 
-	// both are cpu_bound or batch
-	return (s64)(a->deadline - b->deadline) < 0;
+	// if both are batch
+	return higher_hrrn(a, b);
 }
 
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -307,6 +339,10 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	} else {
 		detect_type(bsn, now, flags);
 	}
+
+	// if type is realtime, then set its vft
+	if (IS_REALTIME(bsn))
+		bsn->vft = now + bsn->burst;
 
 	update_curr(cfs_rq);
 
@@ -621,6 +657,10 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		return;
 
 	update_curr(cfs_rq_of(se));
+
+	// if both wse and se are RT, don't preempt
+	if (IS_REALTIME(&wse->bs_node) && IS_REALTIME(&se->bs_node))
+		return;
 
 	if (entity_before(&wse->bs_node, &se->bs_node))
 		goto preempt;
