@@ -36,8 +36,9 @@ unsigned int __read_mostly rt_burst_max		= 4000000U;
 #define EQ(a, b) ((s64)((a) - (b)) == 0)	// is a == b
 #define EQ_D(a, b, d) (LEQ(a, b + d) && GEQ(a, b - d))
 
-#define HRRN_PERCENT(bsn) (100 - \
-(((bsn)->vruntime * 100ULL) / ((bsn)->wait_time + (bsn)->vruntime)))
+#define HRRN_PERCENT(bsn) (1000 - \
+	(((bsn)->vruntime * 1000ULL) /\
+	(rq_clock(rq_of(cfs_rq_of(se_of((bsn))))) - task_of(se_of((bsn)))->start_time)))
 
 static inline bool is_interactive(struct bs_node *bsn, u64 now, u64 _hrrn)
 {
