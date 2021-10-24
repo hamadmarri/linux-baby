@@ -36,10 +36,8 @@ unsigned int __read_mostly rt_burst_max		= 4000000U;
 #define EQ(a, b) ((s64)((a) - (b)) == 0)	// is a == b
 #define EQ_D(a, b, d) (LEQ(a, b + d) && GEQ(a, b - d))
 
-static inline u64 hrrn(struct bs_node *bsn)
-{
-	return (bsn->wait_time + bsn->vruntime) / (bsn->vruntime | 1);
-}
+#define HRRN_PERCENT(bsn) (100 - \
+(((bsn)->vruntime * 100ULL) / ((bsn)->wait_time + (bsn)->vruntime)))
 
 static inline bool is_interactive(struct bs_node *bsn, u64 now, u64 _hrrn)
 {
@@ -232,7 +230,7 @@ static void update_curr_fair(struct rq *rq)
 static inline bool
 higher_hrrn(struct bs_node *a, struct bs_node *b)
 {
-	return (s64)(hrrn(a) - hrrn(b)) > 0;
+	return (int)(HRRN_PERCENT(a) - HRRN_PERCENT(b)) > 0;
 }
 
 /**
@@ -268,13 +266,7 @@ entity_before(struct bs_node *a, struct bs_node *b)
 	else if (IS_NO_TYPE(a) || IS_NO_TYPE(b)) {
 		return (s64)(a->deadline - b->deadline) < 0;
 	}
-	else if (IS_CPU_BOUND(a)) {
-		if (IS_CPU_BOUND(b))
-			return higher_hrrn(a, b);
-		else
-			return (s64)(a->deadline - b->deadline) < 0;
-	}
-	else if (IS_CPU_BOUND(b)) {
+	else if (IS_CPU_BOUND(a) || IS_CPU_BOUND(b)) {
 		return (s64)(a->deadline - b->deadline) < 0;
 	}
 
