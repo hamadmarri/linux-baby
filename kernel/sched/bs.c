@@ -94,9 +94,6 @@ static inline bool is_cpu_bound(struct bs_node *bsn)
 {
 	u64 _hrrn_percent;
 
-	if (!bsn->vruntime)
-		return false;
-
 	_hrrn_percent = bsn->vruntime * 100ULL;
 	_hrrn_percent /= bsn->wait_time + bsn->vruntime;
 
@@ -106,14 +103,21 @@ static inline bool is_cpu_bound(struct bs_node *bsn)
 
 static inline bool is_batch(struct bs_node *bsn, u64 _hrrn)
 {
-	// HRRN < 50%
+	// HRRN > 50%
 	return (LES(_hrrn, 2ULL));
 }
 
 static void detect_type(struct bs_node *bsn, u64 now, int flags)
 {
 	unsigned int new_type = TT_NO_TYPE;
-	u64 _hrrn = hrrn(bsn);
+	u64 _hrrn;
+
+	if (bsn->vruntime == 1) {
+		bsn->task_type = TT_NO_TYPE;
+		return;
+	}
+
+	_hrrn = (bsn->wait_time + bsn->vruntime) / bsn->vruntime;
 
 	if (is_realtime(bsn, now, flags))
 		new_type = TT_REALTIME;
@@ -934,7 +938,7 @@ static void task_fork_fair(struct task_struct *p)
 	struct bs_node *bsn = &p->se.bs_node;
 
 	bsn->task_type		= TT_NO_TYPE;
-	bsn->vruntime		= 0;
+	bsn->vruntime		= 1;
 	bsn->deadline		= 0;
 	bsn->prev_wait_time	= 0;
 	bsn->wait_time		= 0;
