@@ -678,15 +678,132 @@ balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	return newidle_balance(rq, rf) != 0;
 }
 
+static void record_wakee(struct task_struct *p)
+{
+	/*
+	 * Only decay a single time; tasks that have less then 1 wakeup per
+	 * jiffy will not have built up many flips.
+	 */
+	if (time_after(jiffies, current->wakee_flip_decay_ts + HZ)) {
+		current->wakee_flips >>= 1;
+		current->wakee_flip_decay_ts = jiffies;
+	}
+
+	if (current->last_wakee != p) {
+		current->last_wakee = p;
+		current->wakee_flips++;
+	}
+}
+
+/*
+ * Detect M:N waker/wakee relationships via a switching-frequency heuristic.
+ *
+ * A waker of many should wake a different task than the one last awakened
+ * at a frequency roughly N times higher than one of its wakees.
+ *
+ * In order to determine whether we should let the load spread vs consolidating
+ * to shared cache, we look for a minimum 'flip' frequency of llc_size in one
+ * partner, and a factor of lls_size higher frequency in the other.
+ *
+ * With both conditions met, we can be relatively sure that the relationship is
+ * non-monogamous, with partner count exceeding socket size.
+ *
+ * Waker/wakee being client/server, worker/dispatcher, interrupt source or
+ * whatever is irrelevant, spread criteria is apparent partner count exceeds
+ * socket size.
+ */
+static int wake_wide(struct task_struct *p)
+{
+	unsigned int master = current->wakee_flips;
+	unsigned int slave = p->wakee_flips;
+	int factor = __this_cpu_read(sd_llc_size);
+
+	if (master < slave)
+		swap(master, slave);
+	if (slave < factor || master < slave * factor)
+		return 0;
+	return 1;
+}
+
+/*
+ * The purpose of wake_affine() is to quickly determine on which CPU we can run
+ * soonest. For the purpose of speed we only consider the waking and previous
+ * CPU.
+ *
+ * wake_affine_idle() - only considers 'now', it check if the waking CPU is
+ *			cache-affine and is (or	will be) idle.
+ */
+static int
+wake_affine_idle(int this_cpu, int prev_cpu, int sync)
+{
+	/*
+	 * If this_cpu is idle, it implies the wakeup is from interrupt
+	 * context. Only allow the move if cache is shared. Otherwise an
+	 * interrupt intensive workload could force all tasks onto one
+	 * node depending on the IO topology or IRQ affinity settings.
+	 *
+	 * If the prev_cpu is idle and cache affine then avoid a migration.
+	 * There is no guarantee that the cache hot data from an interrupt
+	 * is more important than cache hot data on the prev_cpu and from
+	 * a cpufreq perspective, it's better to have higher utilisation
+	 * on one CPU.
+	 */
+	if (available_idle_cpu(this_cpu) && cpus_share_cache(this_cpu, prev_cpu))
+		return available_idle_cpu(prev_cpu) ? prev_cpu : this_cpu;
+
+	if (sync && cpu_rq(this_cpu)->nr_running == 1)
+		return this_cpu;
+
+	if (available_idle_cpu(prev_cpu))
+		return prev_cpu;
+
+	return nr_cpumask_bits;
+}
+
+static int
+wake_affine(struct task_struct *p, int this_cpu, int prev_cpu, int sync)
+{
+	int target = nr_cpumask_bits;
+
+	target = wake_affine_idle(this_cpu, prev_cpu, sync);
+
+	if (target == nr_cpumask_bits)
+		return prev_cpu;
+
+	return target;
+}
+
 static int
 select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 {
 	struct rq *rq = cpu_rq(prev_cpu);
 	unsigned int min_this = rq->nr_running;
 	unsigned int min = rq->nr_running;
-	int cpu, new_cpu = prev_cpu;
+	int cpu = smp_processor_id();
+	int new_cpu = prev_cpu;
+	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
+	int want_affine = 0;
+
+	/*
+	 * required for stable ->cpus_allowed
+	 */
+	lockdep_assert_held(&p->pi_lock);
+	if (wake_flags & WF_TTWU) {
+		record_wakee(p);
+		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, p->cpus_ptr);
+	}
 
 	for_each_online_cpu(cpu) {
+		if (unlikely(!cpumask_test_cpu(cpu, p->cpus_ptr)))
+			continue;
+
+		if (want_affine) {
+			if (cpu != prev_cpu)
+				new_cpu = wake_affine(p, cpu, prev_cpu, sync);
+
+			return new_cpu;
+		}
+
 		if (cpu_rq(cpu)->nr_running < min) {
 			new_cpu = cpu;
 			min = cpu_rq(cpu)->nr_running;
