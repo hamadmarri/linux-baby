@@ -182,7 +182,7 @@ static ssize_t sched_scaling_write(struct file *filp, const char __user *ubuf,
 		return -EFAULT;
 	buf[cnt] = '\0';
 
-#ifndef CONFIG_BS_SCHED
+#ifndef CONFIG_TT_SCHED
 	if (kstrtouint(buf, 10, &scaling))
 		return -EINVAL;
 
@@ -200,7 +200,7 @@ static ssize_t sched_scaling_write(struct file *filp, const char __user *ubuf,
 
 static int sched_scaling_show(struct seq_file *m, void *v)
 {
-#ifndef CONFIG_BS_SCHED
+#ifndef CONFIG_TT_SCHED
 	seq_printf(m, "%d\n", sysctl_sched_tunable_scaling);
 #endif
 	return 0;
@@ -313,7 +313,7 @@ static __init int sched_init_debug(void)
 	debugfs_create_file("preempt", 0644, debugfs_sched, NULL, &sched_dynamic_fops);
 #endif
 
-#ifndef CONFIG_BS_SCHED
+#ifndef CONFIG_TT_SCHED
 	debugfs_create_u32("latency_ns", 0644, debugfs_sched, &sysctl_sched_latency);
 	debugfs_create_u32("min_granularity_ns", 0644, debugfs_sched, &sysctl_sched_min_granularity);
 	debugfs_create_u32("wakeup_granularity_ns", 0644, debugfs_sched, &sysctl_sched_wakeup_granularity);
@@ -578,7 +578,7 @@ static void print_rq(struct seq_file *m, struct rq *rq, int rq_cpu)
 
 void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 {
-#ifndef CONFIG_BS_SCHED
+#ifndef CONFIG_TT_SCHED
 	s64 MIN_vruntime = -1, min_vruntime, max_vruntime = -1,
 		spread, rq0_min_vruntime, spread0;
 
@@ -771,7 +771,7 @@ do {									\
 	SEQ_printf(m, "\n");
 }
 
-#ifndef CONFIG_BS_SCHED
+#ifndef CONFIG_TT_SCHED
 static const char *sched_tunable_scaling_names[] = {
 	"none",
 	"logarithmic",
@@ -817,7 +817,7 @@ static void sched_debug_header(struct seq_file *m)
 #define PN(x) \
 	SEQ_printf(m, "  .%-40s: %Ld.%06ld\n", #x, SPLIT_NS(x))
 
-#ifndef CONFIG_BS_SCHED
+#ifndef CONFIG_TT_SCHED
 	PN(sysctl_sched_latency);
 	PN(sysctl_sched_min_granularity);
 	PN(sysctl_sched_wakeup_granularity);
@@ -828,7 +828,7 @@ static void sched_debug_header(struct seq_file *m)
 #undef PN
 #undef P
 
-#ifndef CONFIG_BS_SCHED
+#ifndef CONFIG_TT_SCHED
 	SEQ_printf(m, "  .%-40s: %d (%s)\n",
 		"sysctl_sched_tunable_scaling",
 		sysctl_sched_tunable_scaling,
@@ -962,7 +962,7 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 {
 	unsigned long nr_switches;
 
-//#ifdef CONFIG_BS_SCHED
+//#ifdef CONFIG_TT_SCHED
 	//if (p->on_rq)
 		//SEQ_printf(m, "%s (%d, #threads: %d) (on_rq)\n",
 					//p->comm, task_pid_nr_ns(p, ns),
@@ -980,7 +980,7 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 #define PN_SCHEDSTAT(F) __PSN(#F, schedstat_val(p->F))
 
 
-#ifdef CONFIG_BS_SCHED
+#ifdef CONFIG_TT_SCHED
 #define PN_TT(F, S) SEQ_printf(m, "%-45s: %20s\n", #F, #S)
 
 	if (p->se.bs_node.task_type == TT_NO_TYPE)

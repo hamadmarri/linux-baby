@@ -1737,7 +1737,7 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
-#ifdef CONFIG_BS_SCHED
+#ifdef CONFIG_TT_SCHED
 	{
 		.procname	= "sched_interactive_hrrn",
 		.data		= &interactive_hrrn,

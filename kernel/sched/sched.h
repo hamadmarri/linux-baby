@@ -85,7 +85,7 @@
 # define SCHED_WARN_ON(x)	({ (void)(x), 0; })
 #endif
 
-#ifdef CONFIG_BS_SCHED
+#ifdef CONFIG_TT_SCHED
 #define TT_REALTIME	0
 #define TT_INTERACTIVE	1
 #define TT_NO_TYPE	2
@@ -553,13 +553,13 @@ struct cfs_rq {
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
 	struct sched_entity	*curr;
-#ifdef CONFIG_BS_SCHED
+#ifdef CONFIG_TT_SCHED
 	struct bs_node		*head;
 #else
 	struct sched_entity	*next;
 	struct sched_entity	*last;
 	struct sched_entity	*skip;
-#endif /** CONFIG_BS_SCHED */
+#endif /** CONFIG_TT_SCHED */
 
 #ifdef	CONFIG_SCHED_DEBUG
 	unsigned int		nr_spread_over;

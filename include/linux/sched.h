@@ -462,7 +462,7 @@ struct sched_statistics {
 #endif
 };
 
-#ifdef CONFIG_BS_SCHED
+#ifdef CONFIG_TT_SCHED
 struct bs_node {
 	struct bs_node*                 next;
 	struct bs_node*                 prev;
@@ -489,7 +489,7 @@ struct sched_entity {
 	struct list_head		group_node;
 	unsigned int			on_rq;
 
-#ifdef CONFIG_BS_SCHED
+#ifdef CONFIG_TT_SCHED
 	struct bs_node                  bs_node;
 #endif
 
