@@ -40,14 +40,33 @@ choice
 	 on SMP and NUMA systems and exactly dividing by both PAL and
 	 NTSC frame rates for video and multimedia work.
 
+	config HZ_412
+		bool "412 HZ"
+	help
+	 412 Hz is the TT alternative to 500 Hz. Choose 412 Hz
+	 if you care about throughput and performance more than
+	 latency.
+
 	config HZ_803
 		bool "803 HZ"
+	help
+	 803 Hz is the TT alternative to 1000 Hz. Choose 803 Hz
+	 if you want a balance between latency and performance.
 
 	config HZ_1000
 		bool "1000 HZ"
 	help
 	 1000 Hz is the preferred choice for desktop systems and other
 	 systems requiring fast interactive responses to events.
+
+	config HZ_1606
+		bool "1606 HZ"
+	help
+	 1606 Hz is for very high latency bound systems. Choose 1606 Hz
+	 if you don't care about overall throughput or performance, but
+	 you care more about latency (some realtime applications) require
+	 low latency. The response and interactive processes with 1606 Hz
+	 feel much snappier.
 
 endchoice
 
@@ -56,8 +75,10 @@ config HZ
 	default 100 if HZ_100
 	default 250 if HZ_250
 	default 300 if HZ_300
+	default 412 if HZ_412
 	default 803 if HZ_803
 	default 1000 if HZ_1000
+	default 1606 if HZ_1606
 
 config SCHED_HRTICK
 	def_bool HIGH_RES_TIMERS
