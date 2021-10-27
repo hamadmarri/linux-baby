@@ -100,8 +100,6 @@ static void kick_ilb(unsigned int flags)
 {
 	int ilb_cpu;
 
-	//BUG_ON(1);
-
 	/*
 	 * Increase nohz.next_balance only when if full ilb is triggered but
 	 * not if we only update stats.
@@ -618,8 +616,6 @@ static __latent_entropy void run_rebalance_domains(struct softirq_action *h)
 	struct rq *this_rq = this_rq();
 	enum cpu_idle_type idle = this_rq->idle_balance ?
 						CPU_IDLE : CPU_NOT_IDLE;
-
-	//BUG_ON(1);
 
 	/*
 	 * If this CPU has a pending nohz_balance_kick, then do the
