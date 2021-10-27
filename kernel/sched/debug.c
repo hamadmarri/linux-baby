@@ -173,7 +173,9 @@ static ssize_t sched_scaling_write(struct file *filp, const char __user *ubuf,
 				   size_t cnt, loff_t *ppos)
 {
 	char buf[16];
+#ifndef CONFIG_TT_SCHED
 	unsigned int scaling;
+#endif
 
 	if (cnt > 15)
 		cnt = 15;
