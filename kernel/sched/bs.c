@@ -887,6 +887,13 @@ static int move_task(struct rq *dist_rq, struct rq *src_rq,
 	return 0;
 }
 
+static inline int on_null_domain(struct rq *rq)
+{
+	return unlikely(!rcu_dereference_sched(rq->sd));
+}
+
+#include "bs_nohz.h"
+
 static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 {
 	int this_cpu = this_rq->cpu;
@@ -964,15 +971,12 @@ out:
 
 	if (pulled_task)
 		this_rq->idle_stamp = 0;
+	else
+		nohz_newidle_balance(this_rq);
 
 	rq_repin_lock(this_rq, rf);
 
 	return pulled_task;
-}
-
-static inline int on_null_domain(struct rq *rq)
-{
-	return unlikely(!rcu_dereference_sched(rq->sd));
 }
 
 void trigger_load_balance(struct rq *this_rq)
@@ -984,7 +988,7 @@ void trigger_load_balance(struct rq *this_rq)
 	struct rq_flags src_rf;
 
 	if (this_cpu != 0)
-		return;
+		goto out;
 
 	max = min = this_rq->nr_running;
 	max_rq = min_rq = this_rq;
@@ -1011,7 +1015,7 @@ void trigger_load_balance(struct rq *this_rq)
 	}
 
 	if (min_rq == max_rq || max - min < 2)
-		return;
+		goto out;
 
 	rq_lock_irqsave(max_rq, &src_rf);
 	update_rq_clock(max_rq);
@@ -1019,10 +1023,16 @@ void trigger_load_balance(struct rq *this_rq)
 	if (max_rq->nr_running < 2) {
 		rq_unlock(max_rq, &src_rf);
 		local_irq_restore(src_rf.flags);
-		return;
+		goto out;
 	}
 
 	move_task(min_rq, max_rq, &src_rf);
+
+out:
+	if (unlikely(on_null_domain(this_rq) || !cpu_active(cpu_of(this_rq))))
+		return;
+
+	nohz_balancer_kick(this_rq);
 }
 
 void update_group_capacity(struct sched_domain *sd, int cpu) {}
@@ -1112,3 +1122,17 @@ DEFINE_SCHED_CLASS(fair) = {
 
 	.update_curr		= update_curr_fair,
 };
+
+__init void init_sched_fair_class(void)
+{
+#ifdef CONFIG_SMP
+	open_softirq(SCHED_SOFTIRQ, run_rebalance_domains);
+
+#ifdef CONFIG_NO_HZ_COMMON
+	nohz.next_balance = jiffies;
+	nohz.next_blocked = jiffies;
+	zalloc_cpumask_var(&nohz.idle_cpus_mask, GFP_NOWAIT);
+#endif
+#endif /* SMP */
+
+}

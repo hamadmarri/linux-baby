@@ -88,7 +88,7 @@ config NO_HZ_COMMON
 
 choice
 	prompt "Timer tick handling"
-	default HZ_PERIODIC if TT_SCHED
+	default NO_HZ_IDLE if NO_HZ
 
 config HZ_PERIODIC
 	bool "Periodic timer ticks (constant rate, no dynticks)"
@@ -98,7 +98,6 @@ config HZ_PERIODIC
 
 config NO_HZ_IDLE
 	bool "Idle dynticks system (tickless idle)"
-	depends on !TT_SCHED
 	select NO_HZ_COMMON
 	help
 	  This option enables a tickless idle system: timer interrupts
@@ -113,7 +112,6 @@ config NO_HZ_FULL
 	# We need at least one periodic CPU for timekeeping
 	depends on SMP
 	depends on HAVE_CONTEXT_TRACKING
-	depends on !TT_SCHED
 	# VIRT_CPU_ACCOUNTING_GEN dependency
 	depends on HAVE_VIRT_CPU_ACCOUNTING_GEN
 	select NO_HZ_COMMON
@@ -171,7 +169,6 @@ config CONTEXT_TRACKING_FORCE
 config NO_HZ
 	bool "Old Idle dynticks config"
 	default n
-	depends on !TT_SCHED
 	help
 	  This is the old config entry that enables dynticks idle.
 	  We keep it around for a little while to enforce backward

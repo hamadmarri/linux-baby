@@ -962,13 +962,6 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 {
 	unsigned long nr_switches;
 
-//#ifdef CONFIG_TT_SCHED
-	//if (p->on_rq)
-		//SEQ_printf(m, "%s (%d, #threads: %d) (on_rq)\n",
-					//p->comm, task_pid_nr_ns(p, ns),
-					//get_nr_threads(p));
-	//else
-//#endif
 	SEQ_printf(m, "%s (%d, #threads: %d)\n", p->comm, task_pid_nr_ns(p, ns),
 						get_nr_threads(p));
 
