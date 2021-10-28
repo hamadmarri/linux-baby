@@ -32,10 +32,8 @@ unsigned int __read_mostly rt_burst_max		= 4000000U;
 #define IS_BATCH(bsn)		((bsn)->task_type == TT_BATCH)
 
 #define GEQ(a, b) ((s64)((a) - (b)) >= 0)	// is a >= b
-#define GRT(a, b) ((s64)((a) - (b)) > 0)	// is a >  b
 #define LEQ(a, b) ((s64)((a) - (b)) <= 0)	// is a <= b
 #define LES(a, b) ((s64)((a) - (b)) < 0)	// is a <  b
-#define EQ(a, b) ((s64)((a) - (b)) == 0)	// is a == b
 #define EQ_D(a, b, d) (LEQ(a, b + d) && GEQ(a, b - d))
 
 #define HRRN_PERCENT(bsn) (1000 - \
