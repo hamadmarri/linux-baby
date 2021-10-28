@@ -20,8 +20,10 @@ unsigned int __read_mostly rt_burst_max		= 4000000U;
 #define RACE_TIME 40000000
 #define FACTOR (RACE_TIME / HZ_PERIOD)
 
-#define YIELD_MARK(bsn)		((bsn)->deadline |= 0x8000000000000000ULL)
-#define YIELD_UNMARK(bsn)	((bsn)->deadline &= 0x7FFFFFFFFFFFFFFFULL)
+#define YIELD_MARK(bsn)		do {(bsn)->deadline |= 0x8000000000000000ULL; \
+				 (bsn)->vruntime |= 0x8000000000000000ULL;} while (0)
+#define YIELD_UNMARK(bsn)	do {(bsn)->deadline &= 0x7FFFFFFFFFFFFFFFULL; \
+				 (bsn)->vruntime &= 0x7FFFFFFFFFFFFFFFULL;} while (0)
 
 #define IS_REALTIME(bsn)	((bsn)->task_type == TT_REALTIME)
 #define IS_INTERACTIVE(bsn)	((bsn)->task_type == TT_INTERACTIVE)
