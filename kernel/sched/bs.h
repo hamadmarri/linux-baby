@@ -10,6 +10,14 @@ const_debug unsigned int sysctl_sched_migration_cost	= 500000UL;
 void __init sched_init_granularity(void) {}
 
 #ifdef CONFIG_SMP
+/*
+ * For asym packing, by default the lower numbered CPU has higher priority.
+ */
+int __weak arch_asym_cpu_priority(int cpu)
+{
+	return -cpu;
+}
+
 /* Give new sched_entity start runnable values to heavy its load in infant time */
 void init_entity_runnable_average(struct sched_entity *se) {}
 void post_init_entity_util_avg(struct task_struct *p) {}
