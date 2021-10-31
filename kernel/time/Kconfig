@@ -168,7 +168,6 @@ config CONTEXT_TRACKING_FORCE
 
 config NO_HZ
 	bool "Old Idle dynticks config"
-	default n
 	help
 	  This is the old config entry that enables dynticks idle.
 	  We keep it around for a little while to enforce backward
