@@ -33,10 +33,7 @@ extern unsigned int sysctl_sched_min_granularity;
 extern unsigned int sysctl_sched_wakeup_granularity;
 
 #ifdef CONFIG_TT_SCHED
-extern unsigned int __read_mostly interactive_hrrn;
-extern unsigned int __read_mostly rt_wait_delta;
-extern unsigned int __read_mostly rt_burst_delta;
-extern unsigned int __read_mostly rt_burst_max;
+extern unsigned int tt_max_lifetime;
 #endif
 
 enum sched_tunable_scaling {

@@ -9,21 +9,19 @@
 #include "fair_numa.h"
 #include "bs.h"
 
-unsigned int __read_mostly interactive_hrrn	= 2U;
-unsigned int __read_mostly rt_wait_delta	= 800000U;
-unsigned int __read_mostly rt_burst_delta	= 2000000U;
-unsigned int __read_mostly rt_burst_max		= 4000000U;
+unsigned int __read_mostly tt_max_lifetime	= 22000; // in ms
 
-#define DEADLINE_NS    1180000ULL
+#define INTERACTIVE_HRRN	2U
+#define RT_WAIT_DELTA		800000U
+#define RT_BURST_DELTA		2000000U
+#define RT_BURST_MAX		4000000U
 
 #define HZ_PERIOD (1000000000 / HZ)
 #define RACE_TIME 40000000
 #define FACTOR (RACE_TIME / HZ_PERIOD)
 
-#define YIELD_MARK(bsn)		do {(bsn)->deadline |= 0x8000000000000000ULL; \
-				 (bsn)->vruntime |= 0x8000000000000000ULL;} while (0)
-#define YIELD_UNMARK(bsn)	do {(bsn)->deadline &= 0x7FFFFFFFFFFFFFFFULL; \
-				 (bsn)->vruntime &= 0x7FFFFFFFFFFFFFFFULL;} while (0)
+#define YIELD_MARK(bsn)		((bsn)->vruntime |= 0x8000000000000000ULL)
+#define YIELD_UNMARK(bsn)	((bsn)->vruntime &= 0x7FFFFFFFFFFFFFFFULL)
 
 #define IS_REALTIME(bsn)	((bsn)->task_type == TT_REALTIME)
 #define IS_INTERACTIVE(bsn)	((bsn)->task_type == TT_INTERACTIVE)
@@ -36,19 +34,17 @@ unsigned int __read_mostly rt_burst_max		= 4000000U;
 #define LES(a, b) ((s64)((a) - (b)) < 0)	// is a <  b
 #define EQ_D(a, b, d) (LEQ(a, b + d) && GEQ(a, b - d))
 
-#define HRRN_PERCENT(bsn) (1000 - \
-	(((bsn)->vruntime * 1000ULL) /\
-	(rq_clock(rq_of(cfs_rq_of(se_of((bsn))))) - task_of(se_of((bsn)))->start_time)))
+#define HRRN_PERCENT(bsn, now) (((bsn)->vruntime * 1000ULL) / ((now) - (bsn)->start_time))
 
 static inline bool is_interactive(struct bs_node *bsn, u64 now, u64 _hrrn)
 {
 	u64 wait;
 
-	if (LES(_hrrn, (u64) interactive_hrrn))
+	if (LES(_hrrn, (u64) INTERACTIVE_HRRN))
 		return false;
 
 	wait = now - se_of(bsn)->exec_start;
-	if (wait && EQ_D(wait, bsn->prev_wait_time, rt_wait_delta))
+	if (wait && EQ_D(wait, bsn->prev_wait_time, RT_WAIT_DELTA))
 		return false;
 
 	return true;
@@ -73,17 +69,17 @@ static inline bool is_realtime(struct bs_node *bsn, u64 now, int flags)
 		 * (ex. it sleeps for ~10ms and run repeatedly)
 		 */
 		wait = now - se_of(bsn)->exec_start;
-		if (wait && !EQ_D(wait, bsn->prev_wait_time, rt_wait_delta))
+		if (wait && !EQ_D(wait, bsn->prev_wait_time, RT_WAIT_DELTA))
 			return false;
 	}
 
 	// bursts before sleep are relatively equal (delta 2ms)
-	if (!EQ_D(bsn->burst, bsn->prev_burst, rt_burst_delta))
+	if (!EQ_D(bsn->burst, bsn->prev_burst, RT_BURST_DELTA))
 		return false;
 
 	// burst before sleep is <= 4ms
-	if (LEQ(bsn->burst, rt_burst_max) &&
-	    LEQ(bsn->curr_burst, rt_burst_max))
+	if (LEQ(bsn->burst, RT_BURST_MAX) &&
+	    LEQ(bsn->curr_burst, RT_BURST_MAX))
 		return true;
 
 	return false;
@@ -137,6 +133,40 @@ static void detect_type(struct bs_node *bsn, u64 now, int flags)
 	bsn->task_type = new_type;
 }
 
+static void normalize_lifetime(u64 now, struct bs_node *bsn)
+{
+	u64 max_life_ns, life_time, old_hrrn_x;
+	s64 diff;
+
+	/*
+	 * left shift 20 bits is approximately = * 1000000
+	 * we don't need the precision of life time
+	 * Ex. for 22s, with left shift (20bits) == 23.06s
+	 */
+	max_life_ns	= ((u64) tt_max_lifetime) << 20;
+	life_time	= now - bsn->start_time;
+	diff		= life_time - max_life_ns;
+
+	if (likely(diff < 0))
+		return;
+
+	// unmark YIELD. No need to check or remark since
+	// this normalize action doesn't happen very often
+	YIELD_UNMARK(bsn);
+
+	// multiply life_time by 1024 for more precision
+	old_hrrn_x = (life_time << 7) / ((bsn->vruntime >> 3) | 1);
+
+	// reset life to half max_life (i.e ~15s)
+	bsn->start_time = now - (max_life_ns >> 1);
+
+	// avoid division by zero
+	if (old_hrrn_x == 0) old_hrrn_x = 1;
+
+	// reset vruntime based on old hrrn ratio
+	bsn->vruntime = (max_life_ns << 9) / old_hrrn_x;
+}
+
 static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 {
 	struct task_struct *p = task_of(se);
@@ -155,52 +185,18 @@ static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 	return delta + prio_diff;
 }
 
-//const s64 prio_factor[40] = {
- ///* -20 */  -1080000L, -980000L, -880000L, -780000L, -680000L,
- ///* -15 */   -580000L, -480000L, -380000L, -280000L, -180000L,
- ///* -10 */    -80000L,  -79000L,  -78000L,  -77000L,  -76000L,
- ///*  -5 */    -75000L,  -74000L,  -73000L,  -72000L,  -71000L,
- ///*   0 */         0L, 1080000L, 1090000L, 1100000L, 1110000L,
- ///*   5 */   1120000L, 1130000L, 1140000L, 1150000L, 1160000L,
- ///*  10 */   1170000L, 1180000L, 1190000L, 1200000L, 1210000L,
- ///*  15 */   1220000L, 1230000L, 1240000L, 1250000L, 1260000L
-//};
-
-//static inline u64
-//calc_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
-//{
-	//struct task_struct *p = task_of(se);
-	//s64 prio_diff;
-	//u64 now = rq_clock(rq_of(cfs_rq));
-	//u64 deadline = now + DEADLINE_NS;
-
-	//if (PRIO_TO_NICE(p->prio) == 0)
-		//return deadline;
-
-	//prio_diff = prio_factor[PRIO_TO_NICE(p->prio) + 20];
-
-	//return deadline + prio_diff;
-//}
-
-//static inline bool
-//reached_deadline(struct bs_node *bsn, u64 now)
-//{
-	//s64 delta = bsn->deadline - now;
-	//return (delta <= 0);
-//}
-
-//static inline bool
-//reached_vft(struct bs_node *bsn, u64 now)
-//{
-	//s64 delta = bsn->vft - now;
-	//return (delta <= 0);
-//}
+static inline bool
+reached_vft(struct bs_node *bsn, u64 now)
+{
+	s64 delta = bsn->vft - now;
+	return (delta <= 0);
+}
 
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
 	struct bs_node *bsn = &curr->bs_node;
-	u64 now = rq_clock_task(rq_of(cfs_rq));
+	u64 now = sched_clock();
 	u64 delta_exec;
 
 	if (unlikely(!curr))
@@ -217,22 +213,15 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	bsn->vruntime += convert_to_vruntime(delta_exec, curr);
 	detect_type(bsn, now, 0);
 
-	//if (reached_deadline(bsn, now))
-		//bsn->deadline = calc_deadline(cfs_rq, curr);
+	normalize_lifetime(now, &curr->bs_node);
 
-	//if (IS_REALTIME(bsn) && reached_vft(bsn, now))
-		//bsn->vft = now + bsn->burst;
+	if (IS_REALTIME(bsn) && reached_vft(bsn, now))
+		bsn->vft = now + bsn->burst;
 }
 
 static void update_curr_fair(struct rq *rq)
 {
 	update_curr(cfs_rq_of(&rq->curr->se));
-}
-
-static inline bool
-higher_hrrn(struct bs_node *a, struct bs_node *b)
-{
-	return (int)(HRRN_PERCENT(a) - HRRN_PERCENT(b)) > 0;
 }
 
 /**
@@ -241,39 +230,12 @@ higher_hrrn(struct bs_node *a, struct bs_node *b)
 static inline bool
 entity_before(struct bs_node *a, struct bs_node *b)
 {
-	//if (IS_REALTIME(a)) {
-		//if (IS_REALTIME(b))
-			//return (s64)(a->vft - b->vft) <= 0;
-		//else
-			//return true;
-	//}
-	//else if (IS_REALTIME(b)) {
-		//// a here is not rt
-		//return false;
-	//}
-	//else if (IS_INTERACTIVE(a)) {
-		//if (IS_INTERACTIVE(b))
-			//return higher_hrrn(a, b);
-		//else if (IS_NO_TYPE(b))
-			//return (s64)(a->deadline - b->deadline) < 0;
-		//else
-			//return true;
-	//}
-	//else if (IS_INTERACTIVE(b)) {
-		//if (IS_NO_TYPE(a))
-			//return (s64)(a->deadline - b->deadline) < 0;
-		//else
-			//return false;
-	//}
-	//else if (IS_NO_TYPE(a) || IS_NO_TYPE(b)) {
-		//return (s64)(a->deadline - b->deadline) < 0;
-	//}
-	//else if (IS_CPU_BOUND(a) || IS_CPU_BOUND(b)) {
-		//return (s64)(a->deadline - b->deadline) < 0;
-	//}
+	u64 now = sched_clock();
 
-	//// if both are batch
-	return higher_hrrn(a, b);
+	if (IS_REALTIME(a) && IS_REALTIME(b))
+		return (s64)(a->vft - b->vft) < 0;
+
+	return (int)(HRRN_PERCENT(a, now) - HRRN_PERCENT(b, now)) < 0;
 }
 
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -323,9 +285,8 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	struct bs_node *bsn = &se->bs_node;
 	bool curr = cfs_rq->curr == se;
-	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
 	bool wakeup = (flags & ENQUEUE_WAKEUP);
-	u64 now = rq_clock_task(rq_of(cfs_rq));
+	u64 now = sched_clock();
 	u64 wait;
 
 	if (wakeup) {
@@ -339,19 +300,10 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	}
 
 	// if type is realtime, then set its vft
-	//if (IS_REALTIME(bsn))
-		//bsn->vft = now + bsn->burst;
+	if (IS_REALTIME(bsn))
+		bsn->vft = now + bsn->burst;
 
 	update_curr(cfs_rq);
-
-	/*
-	 * Renormalise, such that we're placed at the current
-	 * moment in time, instead of some random moment in the past. Being
-	 * placed in the past could significantly boost this task to the
-	 * fairness detriment of existing tasks.
-	 */
-	//if (renorm && !curr)
-		//se->bs_node.deadline = calc_deadline(cfs_rq, se);
 
 	account_entity_enqueue(cfs_rq, se);
 
@@ -455,11 +407,9 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	if (se->on_rq)
 		__dequeue_entity(cfs_rq, se);
 
-	se->exec_start = rq_clock_task(rq_of(cfs_rq));
+	se->exec_start = sched_clock();
 	cfs_rq->curr = se;
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
-
-	//se->bs_node.deadline = calc_deadline(cfs_rq, se);
 }
 
 static struct sched_entity *
@@ -655,10 +605,6 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		return;
 
 	update_curr(cfs_rq_of(se));
-
-	// if both wse and se are RT, don't preempt
-	if (IS_REALTIME(&wse->bs_node) && IS_REALTIME(&se->bs_node))
-		return;
 
 	if (entity_before(&wse->bs_node, &se->bs_node))
 		goto preempt;
@@ -1053,14 +999,13 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 static void task_fork_fair(struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq;
-	struct sched_entity *curr, *se = &p->se;
+	struct sched_entity *curr;
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
 	struct bs_node *bsn = &p->se.bs_node;
 
 	bsn->task_type		= TT_NO_TYPE;
 	bsn->vruntime		= 1;
-	//bsn->deadline		= 0;
 	bsn->prev_wait_time	= 0;
 	bsn->wait_time		= 0;
 	bsn->vft		= 0;
@@ -1073,8 +1018,6 @@ static void task_fork_fair(struct task_struct *p)
 	update_rq_clock(rq);
 
 	cfs_rq = task_cfs_rq(current);
-
-	//se->bs_node.deadline = calc_deadline(cfs_rq, se);
 
 	curr = cfs_rq->curr;
 	if (curr)

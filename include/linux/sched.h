@@ -468,7 +468,7 @@ struct bs_node {
 	struct bs_node*                 prev;
 	unsigned int			task_type;
 	u64				vruntime;
-	u64				deadline;
+	u64				start_time;
 
 	u64				prev_wait_time;
 	u64				wait_time;
