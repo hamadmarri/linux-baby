@@ -164,7 +164,7 @@ static void normalize_lifetime(u64 now, struct bs_node *bsn)
 	if (old_hrrn_x == 0) old_hrrn_x = 1;
 
 	// reset vruntime based on old hrrn ratio
-	bsn->vruntime = (max_life_ns << 9) / old_hrrn_x;
+	bsn->vruntime = ((max_life_ns << 9) / old_hrrn_x) | 1;
 }
 
 static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
@@ -183,13 +183,6 @@ static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 		return 1;
 
 	return delta + prio_diff;
-}
-
-static inline bool
-reached_vft(struct bs_node *bsn, u64 now)
-{
-	s64 delta = bsn->vft - now;
-	return (delta <= 0);
 }
 
 static void update_curr(struct cfs_rq *cfs_rq)
@@ -214,9 +207,6 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	detect_type(bsn, now, 0);
 
 	normalize_lifetime(now, &curr->bs_node);
-
-	if (IS_REALTIME(bsn) && reached_vft(bsn, now))
-		bsn->vft = now + bsn->burst;
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -231,9 +221,6 @@ static inline bool
 entity_before(struct bs_node *a, struct bs_node *b)
 {
 	u64 now = sched_clock();
-
-	if (IS_REALTIME(a) && IS_REALTIME(b))
-		return (s64)(a->vft - b->vft) < 0;
 
 	return (int)(HRRN_PERCENT(a, now) - HRRN_PERCENT(b, now)) < 0;
 }
@@ -298,10 +285,6 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	} else {
 		detect_type(bsn, now, flags);
 	}
-
-	// if type is realtime, then set its vft
-	if (IS_REALTIME(bsn))
-		bsn->vft = now + bsn->burst;
 
 	update_curr(cfs_rq);
 
@@ -1008,7 +991,6 @@ static void task_fork_fair(struct task_struct *p)
 	bsn->vruntime		= 1;
 	bsn->prev_wait_time	= 0;
 	bsn->wait_time		= 0;
-	bsn->vft		= 0;
 	bsn->prev_burst		= 0;
 	bsn->burst		= 0;
 	bsn->curr_burst		= 0;

@@ -472,9 +472,6 @@ struct bs_node {
 
 	u64				prev_wait_time;
 	u64				wait_time;
-
-	/* virtual finishing time */
-	u64				vft;
 	u64				prev_burst;
 	u64				curr_burst;
 	u64				burst;
