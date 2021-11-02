@@ -5043,7 +5043,9 @@ static void sched_tick_remote(struct work_struct *work)
 	struct rq *rq = cpu_rq(cpu);
 	struct task_struct *curr;
 	struct rq_flags rf;
+#ifndef CONFIG_TT_SCHED
 	u64 delta;
+#endif
 	int os;
 
 	/*
@@ -5062,7 +5064,7 @@ static void sched_tick_remote(struct work_struct *work)
 		goto out_unlock;
 
 	update_rq_clock(rq);
-
+#ifndef CONFIG_TT_SCHED
 	if (!is_idle_task(curr)) {
 		/*
 		 * Make sure the next tick runs within a reasonable
@@ -5071,6 +5073,7 @@ static void sched_tick_remote(struct work_struct *work)
 		delta = rq_clock_task(rq) - curr->se.exec_start;
 		WARN_ON_ONCE(delta > (u64)NSEC_PER_SEC * 3);
 	}
+#endif
 	curr->sched_class->task_tick(rq, curr, 0);
 
 	calc_load_nohz_remote(rq);
