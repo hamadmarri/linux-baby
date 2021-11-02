@@ -4460,6 +4460,10 @@ void wake_up_new_task(struct task_struct *p)
 	update_rq_clock(rq);
 	post_init_entity_util_avg(p);
 
+#ifdef CONFIG_TT_SCHED
+	p->se.bs_node.start_time = sched_clock();
+#endif
+
 	activate_task(rq, p, ENQUEUE_NOCLOCK);
 	trace_sched_wakeup_new(p);
 	check_preempt_curr(rq, p, WF_FORK);
@@ -9295,6 +9299,10 @@ void __init sched_init(void)
 #endif
 
 	wait_bit_init();
+
+#ifdef CONFIG_TT_SCHED
+	printk(KERN_INFO "TT CPU scheduler v5.15 by Hamad Al Marri.");
+#endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	ptr += 2 * nr_cpu_ids * sizeof(void **);
