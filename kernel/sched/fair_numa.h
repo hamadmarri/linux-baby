@@ -1,6 +1,9 @@
-
 #ifdef CONFIG_NUMA_BALANCING
-
+/*
+ * Approximate time to scan a full NUMA task in ms. The task scan period is
+ * calculated based on the tasks virtual memory size and
+ * numa_balancing_scan_size.
+ */
 unsigned int sysctl_numa_balancing_scan_period_min = 1000;
 unsigned int sysctl_numa_balancing_scan_period_max = 60000;
 
@@ -82,6 +85,28 @@ static unsigned int task_scan_min(struct task_struct *p)
 
 	scan = sysctl_numa_balancing_scan_period_min / task_nr_scan_windows(p);
 	return max_t(unsigned int, floor, scan);
+}
+
+static unsigned int task_scan_start(struct task_struct *p)
+{
+	unsigned long smin = task_scan_min(p);
+	unsigned long period = smin;
+	struct numa_group *ng;
+
+	/* Scale the maximum scan period with the amount of shared memory. */
+	rcu_read_lock();
+	ng = rcu_dereference(p->numa_group);
+	if (ng) {
+		unsigned long shared = group_faults_shared(ng);
+		unsigned long private = group_faults_priv(ng);
+
+		period *= refcount_read(&ng->refcount);
+		period *= shared + 1;
+		period /= private + shared + 1;
+	}
+	rcu_read_unlock();
+
+	return max(smin, period);
 }
 
 static unsigned int task_scan_max(struct task_struct *p)
@@ -495,9 +520,32 @@ static inline unsigned long cpu_util(int cpu)
 	return min_t(unsigned long, util, capacity_orig_of(cpu));
 }
 
-static unsigned long capacity_of(int cpu)
+/*
+ * Allow a NUMA imbalance if busy CPUs is less than 25% of the domain.
+ * This is an approximation as the number of running tasks may not be
+ * related to the number of busy CPUs due to sched_setaffinity.
+ */
+static inline bool allow_numa_imbalance(int dst_running, int dst_weight)
 {
-	return cpu_rq(cpu)->cpu_capacity;
+	return (dst_running < (dst_weight >> 2));
+}
+
+#define NUMA_IMBALANCE_MIN 2
+
+static inline long adjust_numa_imbalance(int imbalance,
+				int dst_running, int dst_weight)
+{
+	if (!allow_numa_imbalance(dst_running, dst_weight))
+		return imbalance;
+
+	/*
+	 * Allow a small imbalance based on a simple pair of communicating
+	 * tasks that remain local when the destination is lightly loaded.
+	 */
+	if (imbalance <= NUMA_IMBALANCE_MIN)
+		return 0;
+
+	return imbalance;
 }
 
 static inline enum
@@ -541,6 +589,11 @@ static inline int numa_idle_core(int idle_core, int cpu)
 	return idle_core;
 }
 #endif
+
+static unsigned long capacity_of(int cpu)
+{
+	return cpu_rq(cpu)->cpu_capacity;
+}
 
 /*
  * Gather all necessary information to make NUMA balancing placement
@@ -661,90 +714,6 @@ static bool load_too_imbalanced(long src_load, long dst_load,
 
 	/* Would this change make things worse? */
 	return (imb > old_imb);
-}
-
-static unsigned int task_scan_start(struct task_struct *p)
-{
-	unsigned long smin = task_scan_min(p);
-	unsigned long period = smin;
-	struct numa_group *ng;
-
-	/* Scale the maximum scan period with the amount of shared memory. */
-	rcu_read_lock();
-	ng = rcu_dereference(p->numa_group);
-	if (ng) {
-		unsigned long shared = group_faults_shared(ng);
-		unsigned long private = group_faults_priv(ng);
-
-		period *= refcount_read(&ng->refcount);
-		period *= shared + 1;
-		period /= private + shared + 1;
-	}
-	rcu_read_unlock();
-
-	return max(smin, period);
-}
-
-static void update_scan_period(struct task_struct *p, int new_cpu)
-{
-	int src_nid = cpu_to_node(task_cpu(p));
-	int dst_nid = cpu_to_node(new_cpu);
-
-	if (!static_branch_likely(&sched_numa_balancing))
-		return;
-
-	if (!p->mm || !p->numa_faults || (p->flags & PF_EXITING))
-		return;
-
-	if (src_nid == dst_nid)
-		return;
-
-	/*
-	 * Allow resets if faults have been trapped before one scan
-	 * has completed. This is most likely due to a new task that
-	 * is pulled cross-node due to wakeups or load balancing.
-	 */
-	if (p->numa_scan_seq) {
-		/*
-		 * Avoid scan adjustments if moving to the preferred
-		 * node or if the task was not previously running on
-		 * the preferred node.
-		 */
-		if (dst_nid == p->numa_preferred_nid ||
-		    (p->numa_preferred_nid != NUMA_NO_NODE &&
-			src_nid != p->numa_preferred_nid))
-			return;
-	}
-
-	p->numa_scan_period = task_scan_start(p);
-}
-
-/*
- * Allow a NUMA imbalance if busy CPUs is less than 25% of the domain.
- * This is an approximation as the number of running tasks may not be
- * related to the number of busy CPUs due to sched_setaffinity.
- */
-static inline bool allow_numa_imbalance(int dst_running, int dst_weight)
-{
-	return (dst_running < (dst_weight >> 2));
-}
-
-#define NUMA_IMBALANCE_MIN 2
-
-static inline long adjust_numa_imbalance(int imbalance,
-				int dst_running, int dst_weight)
-{
-	if (!allow_numa_imbalance(dst_running, dst_weight))
-		return imbalance;
-
-	/*
-	 * Allow a small imbalance based on a simple pair of communicating
-	 * tasks that remain local when the destination is lightly loaded.
-	 */
-	if (imbalance <= NUMA_IMBALANCE_MIN)
-		return 0;
-
-	return imbalance;
 }
 
 static unsigned long task_h_load(struct task_struct *p)
@@ -1183,6 +1152,13 @@ static void numa_group_count_active_nodes(struct numa_group *numa_group)
 	numa_group->active_nodes = active_nodes;
 }
 
+/*
+ * When adapting the scan rate, the period is divided into NUMA_PERIOD_SLOTS
+ * increments. The more local the fault statistics are, the higher the scan
+ * period will be for the next scan window. If local/(local+remote) ratio is
+ * below NUMA_PERIOD_THRESHOLD (where range of ratio is 1..NUMA_PERIOD_SLOTS)
+ * the scan period will decrease. Aim for 70% local accesses.
+ */
 #define NUMA_PERIOD_SLOTS 10
 #define NUMA_PERIOD_THRESHOLD 7
 
@@ -1930,6 +1906,9 @@ void init_numa_balancing(unsigned long clone_flags, struct task_struct *p)
 	}
 }
 
+/*
+ * Drive the periodic memory faults..
+ */
 static void task_tick_numa(struct rq *rq, struct task_struct *curr)
 {
 	struct callback_head *work = &curr->numa_work;
@@ -1959,10 +1938,56 @@ static void task_tick_numa(struct rq *rq, struct task_struct *curr)
 			task_work_add(curr, work, TWA_RESUME);
 	}
 }
-#else
-static void account_numa_enqueue(struct rq *rq, struct task_struct *p) {}
-static inline void account_numa_dequeue(struct rq *rq, struct task_struct *p) {}
-static inline void update_scan_period(struct task_struct *p, int new_cpu) {}
-static void task_tick_numa(struct rq *rq, struct task_struct *curr) {}
-#endif /** CONFIG_NUMA_BALANCING */
 
+static void update_scan_period(struct task_struct *p, int new_cpu)
+{
+	int src_nid = cpu_to_node(task_cpu(p));
+	int dst_nid = cpu_to_node(new_cpu);
+
+	if (!static_branch_likely(&sched_numa_balancing))
+		return;
+
+	if (!p->mm || !p->numa_faults || (p->flags & PF_EXITING))
+		return;
+
+	if (src_nid == dst_nid)
+		return;
+
+	/*
+	 * Allow resets if faults have been trapped before one scan
+	 * has completed. This is most likely due to a new task that
+	 * is pulled cross-node due to wakeups or load balancing.
+	 */
+	if (p->numa_scan_seq) {
+		/*
+		 * Avoid scan adjustments if moving to the preferred
+		 * node or if the task was not previously running on
+		 * the preferred node.
+		 */
+		if (dst_nid == p->numa_preferred_nid ||
+		    (p->numa_preferred_nid != NUMA_NO_NODE &&
+			src_nid != p->numa_preferred_nid))
+			return;
+	}
+
+	p->numa_scan_period = task_scan_start(p);
+}
+
+#else
+static void task_tick_numa(struct rq *rq, struct task_struct *curr)
+{
+}
+
+static inline void account_numa_enqueue(struct rq *rq, struct task_struct *p)
+{
+}
+
+static inline void account_numa_dequeue(struct rq *rq, struct task_struct *p)
+{
+}
+
+static inline void update_scan_period(struct task_struct *p, int new_cpu)
+{
+}
+
+#endif /* CONFIG_NUMA_BALANCING */

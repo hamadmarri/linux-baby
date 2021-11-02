@@ -20,46 +20,46 @@ unsigned int __read_mostly tt_max_lifetime	= 22000; // in ms
 #define RACE_TIME 40000000
 #define FACTOR (RACE_TIME / HZ_PERIOD)
 
-#define YIELD_MARK(bsn)		((bsn)->vruntime |= 0x8000000000000000ULL)
-#define YIELD_UNMARK(bsn)	((bsn)->vruntime &= 0x7FFFFFFFFFFFFFFFULL)
+#define YIELD_MARK(ttn)		((ttn)->vruntime |= 0x8000000000000000ULL)
+#define YIELD_UNMARK(ttn)	((ttn)->vruntime &= 0x7FFFFFFFFFFFFFFFULL)
 
-#define IS_REALTIME(bsn)	((bsn)->task_type == TT_REALTIME)
-#define IS_INTERACTIVE(bsn)	((bsn)->task_type == TT_INTERACTIVE)
-#define IS_NO_TYPE(bsn)		((bsn)->task_type == TT_NO_TYPE)
-#define IS_CPU_BOUND(bsn)	((bsn)->task_type == TT_CPU_BOUND)
-#define IS_BATCH(bsn)		((bsn)->task_type == TT_BATCH)
+#define IS_REALTIME(ttn)	((ttn)->task_type == TT_REALTIME)
+#define IS_INTERACTIVE(ttn)	((ttn)->task_type == TT_INTERACTIVE)
+#define IS_NO_TYPE(ttn)		((ttn)->task_type == TT_NO_TYPE)
+#define IS_CPU_BOUND(ttn)	((ttn)->task_type == TT_CPU_BOUND)
+#define IS_BATCH(ttn)		((ttn)->task_type == TT_BATCH)
 
 #define GEQ(a, b) ((s64)((a) - (b)) >= 0)	// is a >= b
 #define LEQ(a, b) ((s64)((a) - (b)) <= 0)	// is a <= b
 #define LES(a, b) ((s64)((a) - (b)) < 0)	// is a <  b
 #define EQ_D(a, b, d) (LEQ(a, b + d) && GEQ(a, b - d))
 
-#define HRRN_PERCENT(bsn, now) (((bsn)->vruntime * 1000ULL) / ((now) - (bsn)->start_time))
+#define HRRN_PERCENT(ttn, now) (((ttn)->vruntime * 1000ULL) / ((now) - (ttn)->start_time))
 
-static inline bool is_interactive(struct bs_node *bsn, u64 now, u64 _hrrn)
+static inline bool is_interactive(struct tt_node *ttn, u64 now, u64 _hrrn)
 {
 	u64 wait;
 
 	if (LES(_hrrn, (u64) INTERACTIVE_HRRN))
 		return false;
 
-	wait = now - se_of(bsn)->exec_start;
-	if (wait && EQ_D(wait, bsn->prev_wait_time, RT_WAIT_DELTA))
+	wait = now - se_of(ttn)->exec_start;
+	if (wait && EQ_D(wait, ttn->prev_wait_time, RT_WAIT_DELTA))
 		return false;
 
 	return true;
 }
 
-static inline bool is_realtime(struct bs_node *bsn, u64 now, int flags)
+static inline bool is_realtime(struct tt_node *ttn, u64 now, int flags)
 {
 	u64 life_time, wait;
 
 	// it has slept at least once
-	if (!bsn->wait_time)
+	if (!ttn->wait_time)
 		return false;
 
 	// life time >= 0.5s
-	life_time = now - task_of(se_of(bsn))->start_time;
+	life_time = now - task_of(se_of(ttn))->start_time;
 	if (LES(life_time, 500000000ULL))
 		return false;
 
@@ -68,72 +68,72 @@ static inline bool is_realtime(struct bs_node *bsn, u64 now, int flags)
 		/* it has relatively equal sleeping/waiting times
 		 * (ex. it sleeps for ~10ms and run repeatedly)
 		 */
-		wait = now - se_of(bsn)->exec_start;
-		if (wait && !EQ_D(wait, bsn->prev_wait_time, RT_WAIT_DELTA))
+		wait = now - se_of(ttn)->exec_start;
+		if (wait && !EQ_D(wait, ttn->prev_wait_time, RT_WAIT_DELTA))
 			return false;
 	}
 
 	// bursts before sleep are relatively equal (delta 2ms)
-	if (!EQ_D(bsn->burst, bsn->prev_burst, RT_BURST_DELTA))
+	if (!EQ_D(ttn->burst, ttn->prev_burst, RT_BURST_DELTA))
 		return false;
 
 	// burst before sleep is <= 4ms
-	if (LEQ(bsn->burst, RT_BURST_MAX) &&
-	    LEQ(bsn->curr_burst, RT_BURST_MAX))
+	if (LEQ(ttn->burst, RT_BURST_MAX) &&
+	    LEQ(ttn->curr_burst, RT_BURST_MAX))
 		return true;
 
 	return false;
 }
 
-static inline bool is_cpu_bound(struct bs_node *bsn)
+static inline bool is_cpu_bound(struct tt_node *ttn)
 {
 	u64 _hrrn_percent;
 
-	_hrrn_percent = bsn->vruntime * 100ULL;
-	_hrrn_percent /= bsn->wait_time + bsn->vruntime;
+	_hrrn_percent = ttn->vruntime * 100ULL;
+	_hrrn_percent /= ttn->wait_time + ttn->vruntime;
 
 	// HRRN >= 80%
 	return (GEQ(_hrrn_percent, 80ULL));
 }
 
-static inline bool is_batch(struct bs_node *bsn, u64 _hrrn)
+static inline bool is_batch(struct tt_node *ttn, u64 _hrrn)
 {
 	// HRRN > 50%
 	return (LES(_hrrn, 2ULL));
 }
 
-static void detect_type(struct bs_node *bsn, u64 now, int flags)
+static void detect_type(struct tt_node *ttn, u64 now, int flags)
 {
 	unsigned int new_type = TT_NO_TYPE;
 	u64 _hrrn;
 
-	if (bsn->vruntime == 1) {
-		bsn->task_type = TT_NO_TYPE;
+	if (ttn->vruntime == 1) {
+		ttn->task_type = TT_NO_TYPE;
 		return;
 	}
 
-	_hrrn = (bsn->wait_time + bsn->vruntime) / bsn->vruntime;
+	_hrrn = (ttn->wait_time + ttn->vruntime) / ttn->vruntime;
 
-	if (is_realtime(bsn, now, flags))
+	if (is_realtime(ttn, now, flags))
 		new_type = TT_REALTIME;
-	else if (is_interactive(bsn, now, _hrrn))
+	else if (is_interactive(ttn, now, _hrrn))
 		new_type = TT_INTERACTIVE;
-	else if (is_cpu_bound(bsn))
+	else if (is_cpu_bound(ttn))
 		new_type = TT_CPU_BOUND;
-	else if (is_batch(bsn, _hrrn))
+	else if (is_batch(ttn, _hrrn))
 		new_type = TT_BATCH;
 
 	if (new_type == TT_REALTIME) {
-		bsn->rt_sticky = 4;
-	} else if (IS_REALTIME(bsn) && bsn->rt_sticky) {
-		bsn->rt_sticky--;
+		ttn->rt_sticky = 4;
+	} else if (IS_REALTIME(ttn) && ttn->rt_sticky) {
+		ttn->rt_sticky--;
 		return;
 	}
 
-	bsn->task_type = new_type;
+	ttn->task_type = new_type;
 }
 
-static void normalize_lifetime(u64 now, struct bs_node *bsn)
+static void normalize_lifetime(u64 now, struct tt_node *ttn)
 {
 	u64 max_life_ns, life_time, old_hrrn_x;
 	s64 diff;
@@ -144,7 +144,7 @@ static void normalize_lifetime(u64 now, struct bs_node *bsn)
 	 * Ex. for 22s, with left shift (20bits) == 23.06s
 	 */
 	max_life_ns	= ((u64) tt_max_lifetime) << 20;
-	life_time	= now - bsn->start_time;
+	life_time	= now - ttn->start_time;
 	diff		= life_time - max_life_ns;
 
 	if (likely(diff < 0))
@@ -152,26 +152,26 @@ static void normalize_lifetime(u64 now, struct bs_node *bsn)
 
 	// unmark YIELD. No need to check or remark since
 	// this normalize action doesn't happen very often
-	YIELD_UNMARK(bsn);
+	YIELD_UNMARK(ttn);
 
 	// multiply life_time by 1024 for more precision
-	old_hrrn_x = (life_time << 7) / ((bsn->vruntime >> 3) | 1);
+	old_hrrn_x = (life_time << 7) / ((ttn->vruntime >> 3) | 1);
 
 	// reset life to half max_life (i.e ~15s)
-	bsn->start_time = now - (max_life_ns >> 1);
+	ttn->start_time = now - (max_life_ns >> 1);
 
 	// avoid division by zero
 	if (old_hrrn_x == 0) old_hrrn_x = 1;
 
 	// reset vruntime based on old hrrn ratio
-	bsn->vruntime = ((max_life_ns << 9) / old_hrrn_x) | 1;
+	ttn->vruntime = ((max_life_ns << 9) / old_hrrn_x) | 1;
 }
 
 static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 {
 	struct task_struct *p = task_of(se);
 	s64 prio_diff;
-	int prio = IS_REALTIME(&se->bs_node) ? -20 : PRIO_TO_NICE(p->prio);
+	int prio = IS_REALTIME(&se->tt_node) ? -20 : PRIO_TO_NICE(p->prio);
 
 	if (prio == 0)
 		return delta;
@@ -188,7 +188,7 @@ static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
-	struct bs_node *bsn = &curr->bs_node;
+	struct tt_node *ttn = &curr->tt_node;
 	u64 now = sched_clock();
 	u64 delta_exec;
 
@@ -202,11 +202,11 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->exec_start = now;
 	curr->sum_exec_runtime += delta_exec;
 
-	bsn->curr_burst += delta_exec;
-	bsn->vruntime += convert_to_vruntime(delta_exec, curr);
-	detect_type(bsn, now, 0);
+	ttn->curr_burst += delta_exec;
+	ttn->vruntime += convert_to_vruntime(delta_exec, curr);
+	detect_type(ttn, now, 0);
 
-	normalize_lifetime(now, &curr->bs_node);
+	normalize_lifetime(now, &curr->tt_node);
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -218,7 +218,7 @@ static void update_curr_fair(struct rq *rq)
  * Should `a` preempts `b`?
  */
 static inline bool
-entity_before(struct bs_node *a, struct bs_node *b)
+entity_before(struct tt_node *a, struct tt_node *b)
 {
 	u64 now = sched_clock();
 
@@ -227,39 +227,39 @@ entity_before(struct bs_node *a, struct bs_node *b)
 
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	struct bs_node *bsn = &se->bs_node;
+	struct tt_node *ttn = &se->tt_node;
 
-	bsn->next = bsn->prev = NULL;
+	ttn->next = ttn->prev = NULL;
 
 	// if empty
 	if (!cfs_rq->head) {
-		cfs_rq->head	= bsn;
+		cfs_rq->head	= ttn;
 	}
 	else {
-		bsn->next	     = cfs_rq->head;
-		cfs_rq->head->prev   = bsn;
-		cfs_rq->head         = bsn;
+		ttn->next	     = cfs_rq->head;
+		cfs_rq->head->prev   = ttn;
+		cfs_rq->head         = ttn;
 	}
 }
 
 static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	struct bs_node *bsn = &se->bs_node;
-	struct bs_node *prev, *next;
+	struct tt_node *ttn = &se->tt_node;
+	struct tt_node *prev, *next;
 
 	// if only one se in rq
 	if (cfs_rq->head->next == NULL) {
 		cfs_rq->head = NULL;
 	}
 	// if it is the head
-	else if (bsn == cfs_rq->head) {
+	else if (ttn == cfs_rq->head) {
 		cfs_rq->head	   = cfs_rq->head->next;
 		cfs_rq->head->prev = NULL;
 	}
 	// if in the middle
 	else {
-		prev = bsn->prev;
-		next = bsn->next;
+		prev = ttn->prev;
+		next = ttn->next;
 
 		prev->next = next;
 		if (next)
@@ -270,7 +270,7 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
-	struct bs_node *bsn = &se->bs_node;
+	struct tt_node *ttn = &se->tt_node;
 	bool curr = cfs_rq->curr == se;
 	bool wakeup = (flags & ENQUEUE_WAKEUP);
 	u64 now = sched_clock();
@@ -278,12 +278,12 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	if (wakeup) {
 		wait = now - se->exec_start;
-		bsn->wait_time += wait;
-		detect_type(bsn, now, flags);
+		ttn->wait_time += wait;
+		detect_type(ttn, now, flags);
 
-		bsn->prev_wait_time = wait;
+		ttn->prev_wait_time = wait;
 	} else {
-		detect_type(bsn, now, flags);
+		detect_type(ttn, now, flags);
 	}
 
 	update_curr(cfs_rq);
@@ -299,16 +299,16 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 static void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
-	struct bs_node *bsn = &se->bs_node;
+	struct tt_node *ttn = &se->tt_node;
 	bool sleep = (flags & DEQUEUE_SLEEP);
 
 	if (sleep) {
-		bsn->prev_burst = bsn->burst;
-		bsn->burst = bsn->curr_burst;
-		bsn->curr_burst = 0;
+		ttn->prev_burst = ttn->burst;
+		ttn->burst = ttn->curr_burst;
+		ttn->curr_burst = 0;
 
-		if (IS_CPU_BOUND(bsn))
-			bsn->task_type = TT_BATCH;
+		if (IS_CPU_BOUND(ttn))
+			ttn->task_type = TT_BATCH;
 	}
 
 	update_curr(cfs_rq);
@@ -355,7 +355,7 @@ static void yield_task_fair(struct rq *rq)
 	struct task_struct *curr = rq->curr;
 	struct cfs_rq *cfs_rq = task_cfs_rq(curr);
 
-	YIELD_MARK(&curr->se.bs_node);
+	YIELD_MARK(&curr->se.tt_node);
 
 	/*
 	 * Are we the only task in the tree?
@@ -398,24 +398,24 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	struct bs_node *bsn = cfs_rq->head;
-	struct bs_node *next;
+	struct tt_node *ttn = cfs_rq->head;
+	struct tt_node *next;
 
-	if (!bsn)
+	if (!ttn)
 		return curr;
 
-	next = bsn->next;
+	next = ttn->next;
 	while (next) {
-		if (entity_before(next, bsn))
-			bsn = next;
+		if (entity_before(next, ttn))
+			ttn = next;
 
 		next = next->next;
 	}
 
-	if (curr && entity_before(&curr->bs_node, bsn))
+	if (curr && entity_before(&curr->tt_node, ttn))
 		return curr;
 
-	return se_of(bsn);
+	return se_of(ttn);
 }
 
 struct task_struct *
@@ -439,7 +439,7 @@ again:
 	p = task_of(se);
 
 	if (prev)
-		YIELD_UNMARK(&prev->se.bs_node);
+		YIELD_UNMARK(&prev->se.tt_node);
 
 done: __maybe_unused;
 #ifdef CONFIG_SMP
@@ -589,7 +589,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 
 	update_curr(cfs_rq_of(se));
 
-	if (entity_before(&wse->bs_node, &se->bs_node))
+	if (entity_before(&wse->tt_node, &se->tt_node))
 		goto preempt;
 
 	return;
@@ -795,16 +795,16 @@ static int move_task(struct rq *dist_rq, struct rq *src_rq,
 {
 	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
 	struct task_struct *p;
-	struct bs_node *bsn = src_cfs_rq->head;
+	struct tt_node *ttn = src_cfs_rq->head;
 
-	while (bsn) {
-		p = task_of(se_of(bsn));
+	while (ttn) {
+		p = task_of(se_of(ttn));
 		if (can_migrate_task(p, cpu_of(dist_rq), src_rq)) {
 			pull_from(dist_rq, src_rq, src_rf, p);
 			return 1;
 		}
 
-		bsn = bsn->next;
+		ttn = ttn->next;
 	}
 
 	/*
@@ -986,16 +986,16 @@ static void task_fork_fair(struct task_struct *p)
 	struct sched_entity *curr;
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
-	struct bs_node *bsn = &p->se.bs_node;
+	struct tt_node *ttn = &p->se.tt_node;
 
-	bsn->task_type		= TT_NO_TYPE;
-	bsn->vruntime		= 1;
-	bsn->prev_wait_time	= 0;
-	bsn->wait_time		= 0;
-	bsn->prev_burst		= 0;
-	bsn->burst		= 0;
-	bsn->curr_burst		= 0;
-	bsn->rt_sticky		= 0;
+	ttn->task_type		= TT_NO_TYPE;
+	ttn->vruntime		= 1;
+	ttn->prev_wait_time	= 0;
+	ttn->wait_time		= 0;
+	ttn->prev_burst		= 0;
+	ttn->burst		= 0;
+	ttn->curr_burst		= 0;
+	ttn->rt_sticky		= 0;
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);

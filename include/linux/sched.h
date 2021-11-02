@@ -525,9 +525,9 @@ struct sched_statistics {
 };
 
 #ifdef CONFIG_TT_SCHED
-struct bs_node {
-	struct bs_node*                 next;
-	struct bs_node*                 prev;
+struct tt_node {
+	struct tt_node*                 next;
+	struct tt_node*                 prev;
 	unsigned int			task_type;
 	u64				vruntime;
 	u64				start_time;
@@ -548,14 +548,15 @@ struct sched_entity {
 	struct list_head		group_node;
 	unsigned int			on_rq;
 
-#ifdef CONFIG_TT_SCHED
-	struct bs_node                  bs_node;
-#endif
-
 	u64				exec_start;
 	u64				sum_exec_runtime;
-	u64				vruntime;
 	u64				prev_sum_exec_runtime;
+
+#ifdef CONFIG_TT_SCHED
+	struct tt_node                  tt_node;
+#endif
+
+	u64				vruntime;
 
 	u64				nr_migrations;
 

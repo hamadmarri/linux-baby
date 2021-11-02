@@ -559,12 +559,12 @@ struct cfs_rq {
 	 */
 	struct sched_entity	*curr;
 #ifdef CONFIG_TT_SCHED
-	struct bs_node		*head;
+	struct tt_node		*head;
 #else
 	struct sched_entity	*next;
 	struct sched_entity	*last;
 	struct sched_entity	*skip;
-#endif /** CONFIG_TT_SCHED */
+#endif /* CONFIG_TT_SCHED */
 
 #ifdef	CONFIG_SCHED_DEBUG
 	unsigned int		nr_spread_over;

@@ -53,9 +53,9 @@ void init_cfs_rq(struct cfs_rq *cfs_rq)
 
 void reweight_task(struct task_struct *p, int prio) {}
 
-static inline struct sched_entity *se_of(struct bs_node *bsn)
+static inline struct sched_entity *se_of(struct tt_node *ttn)
 {
-	return container_of(bsn, struct sched_entity, bs_node);
+	return container_of(ttn, struct sched_entity, tt_node);
 }
 
 #ifdef CONFIG_SCHED_SMT
