@@ -202,7 +202,7 @@ void __init calibrate_delay(void)
 	loops_per_jiffy = freq / HZ / (access_timing() * 2);
 	pr_cont("%lu.%02lu BogoMIPS (lpj=%lu)\n",
 		loops_per_jiffy / (500000 / HZ),
-		(loops_per_jiffy / (5000 / HZ)) % 100, loops_per_jiffy);
+		((loops_per_jiffy * HZ) / 5000) % 100, loops_per_jiffy);
 }
 
 

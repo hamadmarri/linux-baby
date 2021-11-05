@@ -31,7 +31,7 @@ static bool userspace_control;
 static ssize_t interval_msec_show(struct device *dev,
 				  struct device_attribute *attr, char *buf)
 {
-	unsigned long msec = lb_interval_jiffies * 1000 / HZ;
+	unsigned long msec = (lb_interval_jiffies * 1000) / HZ;
 
 	return scnprintf(buf, PAGE_SIZE, "%lu\n", msec);
 }

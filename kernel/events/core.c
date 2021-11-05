@@ -1123,7 +1123,11 @@ perf_cgroup_event_disable(struct perf_event *event, struct perf_event_context *c
  * set default to be dependent on timer tick just
  * like original code
  */
+#if HZ >= 1000
+#define PERF_CPU_HRTIMER (1)
+#else
 #define PERF_CPU_HRTIMER (1000 / HZ)
+#endif
 /*
  * function must be called with interrupts disabled
  */

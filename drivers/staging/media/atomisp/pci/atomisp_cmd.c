@@ -1728,10 +1728,10 @@ void atomisp_wdt_refresh_pipe(struct atomisp_video_pipe *pipe,
 
 	if (atomisp_is_wdt_running(pipe))
 		dev_dbg(pipe->asd->isp->dev, "WDT will hit after %d ms (%s)\n",
-			((int)(next - jiffies) * 1000 / HZ), pipe->vdev.name);
+			(((int)(next - jiffies) * 1000) / HZ), pipe->vdev.name);
 	else
 		dev_dbg(pipe->asd->isp->dev, "WDT starts with %d ms period (%s)\n",
-			((int)(next - jiffies) * 1000 / HZ), pipe->vdev.name);
+			(((int)(next - jiffies) * 1000) / HZ), pipe->vdev.name);
 
 	mod_timer(&pipe->wdt, next);
 }
@@ -1754,10 +1754,10 @@ void atomisp_wdt_refresh(struct atomisp_sub_device *asd, unsigned int delay)
 
 		if (atomisp_is_wdt_running(asd))
 			dev_dbg(asd->isp->dev, "WDT will hit after %d ms\n",
-				((int)(next - jiffies) * 1000 / HZ));
+				(((int)(next - jiffies) * 1000) / HZ));
 		else
 			dev_dbg(asd->isp->dev, "WDT starts with %d ms period\n",
-				((int)(next - jiffies) * 1000 / HZ));
+				(((int)(next - jiffies) * 1000) / HZ));
 
 		mod_timer(&asd->wdt, next);
 		atomic_set(&asd->isp->wdt_count, 0);

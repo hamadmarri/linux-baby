@@ -332,7 +332,7 @@ static int c_show(struct seq_file *m, void *v)
 
 	seq_printf(m, "BogoMIPS\t: %lu.%02lu\n",
 		   loops_per_jiffy / (500000 / HZ),
-		   (loops_per_jiffy / (5000 / HZ)) % 100);
+		   ((loops_per_jiffy * HZ) / 5000) % 100);
 
 	/* dump out the processor features */
 	seq_puts(m, "Features\t: ");

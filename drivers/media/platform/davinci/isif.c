@@ -398,7 +398,7 @@ static void isif_config_linearization(struct isif_linearize *linearize)
 static int isif_config_dfc(struct isif_dfc *vdfc)
 {
 	/* initialize retries to loop for max ~ 250 usec */
-	u32 val, count, retries = loops_per_jiffy / (4000/HZ);
+	u32 val, count, retries = (loops_per_jiffy * HZ) / 4000;
 	int i;
 
 	if (!vdfc->en)

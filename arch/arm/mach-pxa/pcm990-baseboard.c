@@ -354,7 +354,11 @@ static void pcm990_mci_exit(struct device *dev, void *data)
 	free_irq(PCM027_MMCDET_IRQ, data);
 }
 
+#if HZ >= 1000
+#define MSECS_PER_JIFFY (1)
+#else
 #define MSECS_PER_JIFFY (1000/HZ)
+#endif
 
 static struct pxamci_platform_data pcm990_mci_platform_data = {
 	.detect_delay_ms	= 250,

@@ -85,7 +85,7 @@ void	_rtw_init_queue(struct __queue *pqueue)
 
 inline u32 rtw_systime_to_ms(u32 systime)
 {
-	return systime * 1000 / HZ;
+	return (systime * 1000) / HZ;
 }
 
 inline u32 rtw_ms_to_systime(u32 ms)
