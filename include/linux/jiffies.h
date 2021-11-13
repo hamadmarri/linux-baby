@@ -40,6 +40,8 @@
 # define SHIFT_HZ	12
 #elif HZ >= 6144 && HZ < 12288
 # define SHIFT_HZ	13
+#elif HZ >= 12288 && HZ < 24576
+# define SHIFT_HZ	14
 #else
 # error Invalid value of HZ.
 #endif
