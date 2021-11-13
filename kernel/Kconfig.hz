@@ -67,6 +67,22 @@ choice
 	 low latency. The response and interactive processes with 1666 Hz
 	 feel much snappier.
 
+	config HZ_3333
+		bool "3333 HZ"
+	help
+	 Tick every ~300us
+
+	config HZ_5000
+		bool "5000 HZ"
+	help
+	 Ticks every 200us
+
+	config HZ_10000
+		bool "10000 HZ"
+	help
+	 10k Hz. The kernel would be lucky if it can finishes its job before
+	 the next tick happens (if you chose 10k Hz, it will tick every 100us).
+
 endchoice
 
 config HZ
