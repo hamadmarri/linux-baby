@@ -94,6 +94,9 @@ config HZ
 	default 833 if HZ_833
 	default 1000 if HZ_1000
 	default 1666 if HZ_1666
+	default 3333 if HZ_3333
+	default 5000 if HZ_5000
+	default 10000 if HZ_10000
 
 config SCHED_HRTICK
 	def_bool HIGH_RES_TIMERS
