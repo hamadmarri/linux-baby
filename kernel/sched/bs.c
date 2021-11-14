@@ -640,7 +640,7 @@ static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	if (pick_next_entity(cfs_rq, curr) != curr)
-		resched_curr(rq_of(cfs_rq));
+		resched_curr_lazy(rq_of(cfs_rq));
 }
 
 static void
@@ -688,7 +688,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	return;
 
 preempt:
-	resched_curr(rq);
+	resched_curr_lazy(rq);
 }
 
 #ifdef CONFIG_SMP
@@ -1115,7 +1115,7 @@ static void task_fork_fair(struct task_struct *p)
 		update_curr(cfs_rq);
 
 		if (sysctl_sched_child_runs_first)
-			resched_curr(rq);
+			resched_curr_lazy(rq);
 	}
 
 	rq_unlock(rq, &rf);

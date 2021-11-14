@@ -233,7 +233,7 @@ prio_changed_fair(struct rq *rq, struct task_struct *p, int oldprio)
 	 */
 	if (task_current(rq, p)) {
 		if (p->prio > oldprio)
-			resched_curr(rq);
+			resched_curr_lazy(rq);
 	} else
 		check_preempt_curr(rq, p, 0);
 }
