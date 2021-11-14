@@ -85,7 +85,11 @@ static struct console kgdb_nmi_console = {
  * to make copy-pasting to the terminal usable.
  */
 #define KGDB_NMI_BAUD		115200
+#if HZ > 7200
+#define KGDB_NMI_FIFO_SIZE 2
+#else
 #define KGDB_NMI_FIFO_SIZE	roundup_pow_of_two(KGDB_NMI_BAUD / 8 / HZ)
+#endif
 
 struct kgdb_nmi_tty_priv {
 	struct tty_port port;

@@ -5,7 +5,7 @@
 
 choice
 	prompt "Timer frequency"
-	default HZ_250
+	default HZ_833
 	help
 	 Allows the configuration of the timer frequency. It is customary
 	 to have the timer interrupt run at 1000 Hz but 100 Hz may be more
@@ -40,11 +40,48 @@ choice
 	 on SMP and NUMA systems and exactly dividing by both PAL and
 	 NTSC frame rates for video and multimedia work.
 
+	config HZ_417
+		bool "417 HZ"
+	help
+	 417 Hz is the TT alternative to 300 Hz. Choose 417 Hz
+	 if you prefer performance over latency.
+
+	config HZ_833
+		bool "833 HZ"
+	help
+	 833 Hz is the TT alternative to 1000 Hz. Choose 833 Hz
+	 if you want a balance between latency and performance.
+
 	config HZ_1000
 		bool "1000 HZ"
 	help
 	 1000 Hz is the preferred choice for desktop systems and other
 	 systems requiring fast interactive responses to events.
+
+	config HZ_1666
+		bool "1666 HZ"
+	help
+	 1666 Hz is for very high latency bound systems. Choose 1666 Hz
+	 if you don't care about overall throughput or performance, but
+	 you care more about latency (some realtime applications) require
+	 low latency. The response and interactive processes with 1666 Hz
+	 feel much snappier.
+
+	config HZ_3333
+		bool "3333 HZ"
+	help
+	 Tick every ~300us
+
+	config HZ_5000
+		bool "5000 HZ"
+	help
+	 Ticks every 200us
+
+	config HZ_10000
+		bool "10000 HZ"
+	help
+	 10k Hz. The kernel would be lucky if it can finishes its job before
+	 the next tick happens (if you chose 10k Hz, it will tick every 100us).
 
 endchoice
 
@@ -53,7 +90,13 @@ config HZ
 	default 100 if HZ_100
 	default 250 if HZ_250
 	default 300 if HZ_300
+	default 417 if HZ_417
+	default 833 if HZ_833
 	default 1000 if HZ_1000
+	default 1666 if HZ_1666
+	default 3333 if HZ_3333
+	default 5000 if HZ_5000
+	default 10000 if HZ_10000
 
 config SCHED_HRTICK
 	def_bool HIGH_RES_TIMERS
