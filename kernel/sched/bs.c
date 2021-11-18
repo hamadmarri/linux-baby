@@ -11,7 +11,15 @@
 #include "bs.h"
 
 unsigned int __read_mostly tt_max_lifetime	= 22000; // in ms
+unsigned int __read_mostly interactivity_factor	= 32768;
+unsigned int __read_mostly starve_factor	= 12288;
+unsigned int __read_mostly starve_divisor	= 2000000; // 2ms
+
 int __read_mostly tt_rt_prio			= -20;
+int __read_mostly tt_interactive_prio		= -3;
+int __read_mostly tt_notype_prio		= -2;
+int __read_mostly tt_cpubound_prio		= 1;
+int __read_mostly tt_batch_prio			= 0;
 
 #define INTERACTIVE_HRRN	2U
 #define RT_WAIT_DELTA		800000U
@@ -32,8 +40,6 @@ int __read_mostly tt_rt_prio			= -20;
 #define LEQ(a, b) ((s64)((a) - (b)) <= 0)	// is a <= b
 #define LES(a, b) ((s64)((a) - (b)) < 0)	// is a <  b
 #define EQ_D(a, b, d) (LEQ(a, b + d) && GEQ(a, b - d))
-
-#define HRRN_PERCENT(ttn, now) (((ttn)->vruntime * 1000ULL) / ((now) - (ttn)->start_time))
 
 static inline bool is_interactive(struct tt_node *ttn, u64 now, u64 _hrrn)
 {
@@ -170,7 +176,24 @@ static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
 {
 	struct task_struct *p = task_of(se);
 	s64 prio_diff;
-	int prio = IS_REALTIME(&se->tt_node) ? tt_rt_prio : PRIO_TO_NICE(p->prio);
+	int prio = PRIO_TO_NICE(p->prio);
+
+	switch (se->tt_node.task_type) {
+		case TT_REALTIME:
+			prio = tt_rt_prio ? tt_rt_prio : prio;
+			break;
+		case TT_INTERACTIVE:
+			prio = tt_interactive_prio ? tt_interactive_prio : prio;
+			break;
+		case TT_NO_TYPE:
+			prio = tt_notype_prio ? tt_notype_prio : prio;
+			break;
+		case TT_CPU_BOUND:
+			prio = tt_cpubound_prio ? tt_cpubound_prio : prio;
+			break;
+		case TT_BATCH:
+			prio = tt_batch_prio ? tt_batch_prio : prio;
+	}
 
 	if (prio == 0)
 		return delta;
@@ -202,6 +225,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 		return;
 
 	curr->exec_start = now;
+	curr->tt_node.last_run = now;
 
 #ifdef CONFIG_TT_ACCOUNTING_STATS
 	schedstat_set(curr->statistics.exec_max,
@@ -229,15 +253,93 @@ static void update_curr_fair(struct rq *rq)
 	update_curr(cfs_rq_of(&rq->curr->se));
 }
 
-/**
- * Should `a` preempts `b`?
+static inline int cn_has_idle_policy(struct tt_node *ttn)
+{
+	return task_has_idle_policy(task_of(se_of(ttn)));
+}
+
+static inline unsigned int
+calc_interactivity(u64 now, struct tt_node *ttn)
+{
+	u64 l_se, vr_se, sleep_se = 1ULL, u64_factor_m, _2m;
+	unsigned int score_se;
+
+	l_se		= now - ttn->start_time;
+	vr_se		= ttn->vruntime;
+	u64_factor_m	= interactivity_factor;
+	_2m		= u64_factor_m << 1;
+
+	/* safety check */
+	if (likely(l_se > vr_se))
+		sleep_se = (l_se - vr_se) | 1;
+
+	if (sleep_se >= vr_se)
+		score_se = u64_factor_m / (sleep_se / vr_se);
+	else
+		score_se = _2m - (u64_factor_m / (vr_se / sleep_se));
+
+	return score_se;
+}
+
+static inline unsigned int
+calc_starve_score(u64 now, struct tt_node *ttn)
+{
+	struct sched_entity *se = se_of(ttn);
+	struct cfs_rq *cfs_rq = cfs_rq_of(se);
+	u64 s_div = starve_divisor;
+	u64 starving = 1ULL;
+	u64 u64_factor_m = starve_factor;
+	u64 _2m = u64_factor_m << 1;
+	unsigned int score;
+
+	if (!starve_factor)
+		return 0;
+
+	if (se == cfs_rq->curr)
+		return _2m;
+
+	starving = (now - ttn->last_run) | 1;
+
+	if (s_div >= starving)
+		score = _2m - (u64_factor_m / (s_div / starving));
+	else
+		score = u64_factor_m / (starving / s_div);
+
+	return score;
+}
+
+/*
+ * Does a has lower interactivity score value
+ * (i.e. interactive) than b? If yes, return 1,
+ * otherwise return 0
+ * a is before b if a has lower interactivity score value
+ * the lower score, the more interactive
  */
 static inline bool
 entity_before(struct tt_node *a, struct tt_node *b)
 {
 	u64 now = sched_clock();
+	unsigned int score_a, score_b;
+	int diff;
+	int is_a_idle = cn_has_idle_policy(a);
+	int is_b_idle = cn_has_idle_policy(b);
 
-	return (int)(HRRN_PERCENT(a, now) - HRRN_PERCENT(b, now)) < 0;
+	/* if a is normal but b is idle class, then yes */
+	if (!is_a_idle && is_b_idle)
+		return true;
+
+	/* if a is idle class and b is normal, then no */
+	if (is_a_idle && !is_b_idle)
+		return false;
+
+	score_a = calc_interactivity(now, a);
+	score_a += calc_starve_score(now, a);
+
+	score_b = calc_interactivity(now, b);
+	score_b	+= calc_starve_score(now, b);
+
+	diff = score_a - score_b;
+	return (diff < 0);
 }
 
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -460,7 +562,7 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		update_load_avg(cfs_rq, se, UPDATE_TG);
 	}
 
-	se->exec_start = sched_clock();
+	se->tt_node.last_run = se->exec_start = sched_clock();
 	cfs_rq->curr = se;
 
 #ifdef CONFIG_TT_ACCOUNTING_STATS

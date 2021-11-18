@@ -30,7 +30,14 @@ extern unsigned int sysctl_sched_child_runs_first;
 
 #ifdef CONFIG_TT_SCHED
 extern unsigned int tt_max_lifetime;
+extern unsigned int interactivity_factor;
+extern unsigned int starve_factor;
+extern unsigned int starve_divisor;
 extern int tt_rt_prio;
+extern int tt_interactive_prio;
+extern int tt_notype_prio;
+extern int tt_cpubound_prio;
+extern int tt_batch_prio;
 #endif
 
 enum sched_tunable_scaling {
