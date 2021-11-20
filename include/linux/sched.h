@@ -527,7 +527,6 @@ struct tt_node {
 	unsigned int			task_type;
 	u64				vruntime;
 	u64				start_time;
-	u64				last_run;
 
 	u64				prev_wait_time;
 	u64				wait_time;
