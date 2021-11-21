@@ -3033,6 +3033,12 @@ void relax_compatible_cpus_allowed_ptr(struct task_struct *p)
 	kfree(user_mask);
 }
 
+inline void dec_nr_lat_sensitive(unsigned int cpu)
+{
+	if (per_cpu(nr_lat_sensitive, cpu))
+		per_cpu(nr_lat_sensitive, cpu)--;
+}
+
 void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 {
 #ifdef CONFIG_SCHED_DEBUG
@@ -3078,6 +3084,11 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 	trace_sched_migrate_task(p, new_cpu);
 
 	if (task_cpu(p) != new_cpu) {
+		if (task_is_lat_sensitive(p)) {
+			dec_nr_lat_sensitive(task_cpu(p));
+			per_cpu(nr_lat_sensitive, new_cpu)++;
+		}
+
 		if (p->sched_class->migrate_task_rq)
 			p->sched_class->migrate_task_rq(p, new_cpu);
 		p->se.nr_migrations++;
@@ -4490,6 +4501,7 @@ void wake_up_new_task(struct task_struct *p)
 {
 	struct rq_flags rf;
 	struct rq *rq;
+	int target_cpu = 0;
 
 	raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
 	WRITE_ONCE(p->__state, TASK_RUNNING);
@@ -4504,9 +4516,16 @@ void wake_up_new_task(struct task_struct *p)
 	 */
 	p->recent_used_cpu = task_cpu(p);
 	rseq_migrate(p);
-	__set_task_cpu(p, select_task_rq(p, task_cpu(p), WF_FORK));
+	target_cpu = select_task_rq(p, task_cpu(p), WF_FORK);
+	__set_task_cpu(p, target_cpu);
 #endif
 	rq = __task_rq_lock(p, &rf);
+
+#ifdef CONFIG_SMP
+	if (task_is_lat_sensitive(p))
+		per_cpu(nr_lat_sensitive, target_cpu)++;
+#endif
+
 	update_rq_clock(rq);
 	post_init_entity_util_avg(p);
 #ifdef CONFIG_TT_SCHED
@@ -4893,6 +4912,9 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	if (unlikely(prev_state == TASK_DEAD)) {
 		if (prev->sched_class->task_dead)
 			prev->sched_class->task_dead(prev);
+
+		if (task_is_lat_sensitive(prev))
+			dec_nr_lat_sensitive(prev->cpu);
 
 		/*
 		 * Release VMAP'ed task stack immediate for reuse. On RT
@@ -9364,6 +9386,7 @@ static struct kmem_cache *task_group_cache __read_mostly;
 
 DECLARE_PER_CPU(cpumask_var_t, load_balance_mask);
 DECLARE_PER_CPU(cpumask_var_t, select_idle_mask);
+DEFINE_PER_CPU(int, nr_lat_sensitive);
 
 void __init sched_init(void)
 {
@@ -9513,6 +9536,7 @@ void __init sched_init(void)
 #endif /* CONFIG_SMP */
 		hrtick_rq_init(rq);
 		atomic_set(&rq->nr_iowait, 0);
+		per_cpu(nr_lat_sensitive, i) = 0;
 
 #ifdef CONFIG_SCHED_CORE
 		rq->core = rq;

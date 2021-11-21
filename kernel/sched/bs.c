@@ -104,7 +104,9 @@ static inline bool is_batch(struct tt_node *ttn, u64 _hrrn)
 static void detect_type(struct tt_node *ttn, u64 now, int flags)
 {
 	unsigned int new_type = TT_NO_TYPE;
+	unsigned int old_type = ttn->task_type;
 	u64 _hrrn;
+	unsigned int cpu;
 
 	if (ttn->vruntime == 1) {
 		ttn->task_type = TT_NO_TYPE;
@@ -127,6 +129,24 @@ static void detect_type(struct tt_node *ttn, u64 now, int flags)
 	} else if (IS_REALTIME(ttn) && ttn->rt_sticky) {
 		ttn->rt_sticky--;
 		return;
+	}
+
+	if (new_type != old_type) {
+		cpu = task_cpu(task_of(se_of(ttn)));
+
+		/*
+		 * Recall:
+		 * TT_REALTIME		0
+		 * TT_INTERACTIVE	1
+		 * TT_NO_TYPE		2
+		 * TT_CPU_BOUND		3
+		 * TT_BATCH		4
+		 */
+		if (new_type < 2 && old_type > 1)
+			per_cpu(nr_lat_sensitive, cpu)++;
+		else if (old_type < 2 && new_type > 1)
+			dec_nr_lat_sensitive(cpu);
+
 	}
 
 	ttn->task_type = new_type;
@@ -1161,6 +1181,8 @@ out:
 
 		this_rq->next_balance = jiffies + interval;
 		update_blocked_averages(this_rq->cpu);
+
+		dec_nr_lat_sensitive(this_rq->cpu);
 	}
 #endif
 
