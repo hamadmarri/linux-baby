@@ -288,6 +288,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	struct tt_node *ttn = &se->tt_node;
 	bool curr = cfs_rq->curr == se;
 	bool wakeup = (flags & ENQUEUE_WAKEUP);
+	bool deferred = (flags & ENQUEUE_DEFERRED);
 	u64 now = sched_clock();
 	u64 wait;
 
@@ -301,8 +302,6 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 		detect_type(ttn, now, flags);
 	}
 
-	update_curr(cfs_rq);
-
 	/*
 	 * When enqueuing a sched_entity, we must:
 	 *   - Update loads to have both entity and cfs_rq synced with now.
@@ -311,7 +310,9 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 *     its group cfs_rq
 	 *   - Add its new weight to cfs_rq->load.weight
 	 */
-	update_load_avg(cfs_rq, se, UPDATE_TG | DO_ATTACH);
+	if (!deferred)
+		update_load_avg(cfs_rq, se, UPDATE_TG | DO_ATTACH);
+
 	account_entity_enqueue(cfs_rq, se);
 	check_schedstat_required();
 	update_stats_enqueue(cfs_rq, se, flags);
@@ -336,8 +337,6 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 		if (IS_CPU_BOUND(ttn))
 			ttn->task_type = TT_BATCH;
 	}
-
-	update_curr(cfs_rq);
 
 	/*
 	 * When dequeuing a sched_entity, we must:
@@ -446,6 +445,11 @@ static bool yield_to_task_fair(struct rq *rq, struct task_struct *p)
 	return true;
 }
 
+static inline void update_stat_deferred(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	update_load_avg(cfs_rq, se, UPDATE_TG | DO_ATTACH);
+}
+
 static void
 set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
@@ -533,6 +537,13 @@ done: __maybe_unused;
 	 * one.
 	 */
 	list_move(&p->se.group_node, &rq->cfs_tasks);
+#endif
+
+#ifdef CONFIG_TT_ACCOUNTING_STATS
+	if (p->migration_flags & TASK_DEFERRED) {
+		p->migration_flags &= ~TASK_DEFERRED;
+		update_stat_deferred(cfs_rq, se);
+	}
 #endif
 
 	update_misfit_status(p, rq);
@@ -970,7 +981,8 @@ static void pull_from(struct rq *dist_rq,
 	rq_lock(dist_rq, &rf);
 	update_rq_clock(dist_rq);
 
-	activate_task(dist_rq, p, ENQUEUE_NOCLOCK);
+	p->migration_flags |= TASK_DEFERRED;
+	activate_task(dist_rq, p, ENQUEUE_NOCLOCK | ENQUEUE_DEFERRED);
 	check_preempt_curr(dist_rq, p, 0);
 
 	// unlock dist rq
