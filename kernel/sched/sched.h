@@ -541,6 +541,12 @@ struct cfs_rq {
 	unsigned int		idle_h_nr_running; /* SCHED_IDLE */
 
 	u64			exec_clock;
+
+#ifdef CONFIG_TT_SCHED
+#ifdef CONFIG_SCHED_CORE
+	unsigned int		forceidle_seq;
+#endif
+#else
 	u64			min_vruntime;
 #ifdef CONFIG_SCHED_CORE
 	unsigned int		forceidle_seq;
@@ -550,6 +556,7 @@ struct cfs_rq {
 #ifndef CONFIG_64BIT
 	u64			min_vruntime_copy;
 #endif
+#endif /* CONFIG_TT_SCHED */
 
 	struct rb_root_cached	tasks_timeline;
 
