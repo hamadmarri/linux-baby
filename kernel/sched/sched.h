@@ -1151,11 +1151,6 @@ static inline int cpu_of(struct rq *rq)
 
 #define MDF_PUSH	0x01
 
-#ifdef CONFIG_TT_ACCOUNTING_STATS
-#define TASK_DEFERRED	0x02
-#endif
-
-
 static inline bool is_migration_disabled(struct task_struct *p)
 {
 #ifdef CONFIG_SMP
@@ -2120,11 +2115,6 @@ extern const u32		sched_prio_to_wmult[40];
 #define ENQUEUE_REPLENISH	0x20
 #ifdef CONFIG_SMP
 #define ENQUEUE_MIGRATED	0x40
-
-#ifdef CONFIG_TT_ACCOUNTING_STATS
-#define ENQUEUE_DEFERRED	0x80
-#endif
-
 #else
 #define ENQUEUE_MIGRATED	0x00
 #endif
