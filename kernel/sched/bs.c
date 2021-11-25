@@ -906,25 +906,28 @@ static inline int on_null_domain(struct rq *rq)
 
 static inline int global_idle_check(struct rq *this_rq)
 {
-	struct cfs_rq *cfs_rq = &this_rq->cfs;
-	struct tt_node *ttn;
-	struct tt_node **alt_head;
+	//struct cfs_rq *cfs_rq = &this_rq->cfs;
+	//struct tt_node *ttn;
+	//struct tt_node **alt_head;
 
-	GLOBAL_RQ_LOCK_IRQSAVE;
+	//GLOBAL_RQ_LOCK_IRQSAVE;
 
-	alt_head = &global_ttn;
+	//alt_head = &global_ttn;
 
-	ttn = (*alt_head);
+	//ttn = (*alt_head);
 
-	while (ttn && !global_can_migrate(cfs_rq, ttn, NULL))
-		ttn = ttn->next;
+	//while (ttn && !global_can_migrate(cfs_rq, ttn, NULL))
+		//ttn = ttn->next;
 
-	GLOBAL_RQ_UNLOCK_IRQRESTORE;
+	//GLOBAL_RQ_UNLOCK_IRQRESTORE;
 
-	if (!ttn)
-		return 0;
+	//if (!ttn)
+		//return 0;
 
-	return 1;
+	//return 1;
+	if (READ_ONCE(global_ttn))
+		return 1;
+	return 0;
 }
 
 #include "bs_nohz.h"
@@ -979,31 +982,38 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 
 void trigger_load_balance(struct rq *this_rq)
 {
-	struct rq_flags rf;
+	/* scale ms to jiffies */
+	//unsigned long interval = msecs_to_jiffies(6);
+	//struct rq_flags rf;
 
 	if (!this_rq->idle_balance)
 		goto out;
 
-	if (READ_ONCE(global_ttn)) {
-		rq_lock(this_rq, &rf);
-		update_rq_clock(this_rq);
-		resched_curr(this_rq);
-		rq_unlock(this_rq, &rf);
-	}
+	//if (time_before(jiffies, this_rq->next_balance))
+		//goto out;
+
+	//if (READ_ONCE(global_ttn)) {
+		//rq_lock(this_rq, &rf);
+		//update_rq_clock(this_rq);
+		//resched_curr(this_rq);
+		//rq_unlock(this_rq, &rf);
+	//}
+
+	//this_rq->next_balance = jiffies + interval;
 
 out:
 	if (unlikely(on_null_domain(this_rq) || !cpu_active(cpu_of(this_rq))))
 		return;
 
-#ifdef CONFIG_TT_ACCOUNTING_STATS
-	if (time_after_eq(jiffies, this_rq->next_balance)) {
-		/* scale ms to jiffies */
-		unsigned long interval = msecs_to_jiffies(19);
+//#ifdef CONFIG_TT_ACCOUNTING_STATS
+	//if (time_after_eq(jiffies, this_rq->next_balance)) {
+		///* scale ms to jiffies */
+		//unsigned long interval = msecs_to_jiffies(19);
 
-		this_rq->next_balance = jiffies + interval;
-		update_blocked_averages(this_rq->cpu);
-	}
-#endif
+		//this_rq->next_balance = jiffies + interval;
+		//update_blocked_averages(this_rq->cpu);
+	//}
+//#endif
 
 	nohz_balancer_kick(this_rq);
 }

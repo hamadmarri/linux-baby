@@ -5567,23 +5567,25 @@ __pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	 * higher scheduling class, because otherwise those lose the
 	 * opportunity to pull in more work from other CPUs.
 	 */
-	if (likely(prev->sched_class <= &fair_sched_class &&
-		   rq->nr_running == rq->cfs.h_nr_running)) {
+	//if (likely(prev->sched_class <= &fair_sched_class // &&
+		   ////rq->nr_running == rq->cfs.h_nr_running
+		   //)) {
 
-		p = pick_next_task_fair(rq, prev, rf);
-		if (unlikely(p == RETRY_TASK))
-			goto restart;
+		//p = pick_next_task_fair(rq, prev, rf);
+		//if (unlikely(p == RETRY_TASK))
+			//goto restart;
 
-		/* Assume the next prioritized class is idle_sched_class */
-		if (!p) {
-			put_prev_task(rq, prev);
-			p = pick_next_task_idle(rq);
-		}
+		///* Assume the next prioritized class is idle_sched_class */
+		////if (!p) {
+			////put_prev_task(rq, prev);
+			////p = pick_next_task_idle(rq);
+		////}
 
-		return p;
-	}
+		//if (p)
+			//return p;
+	//}
 
-restart:
+//restart:
 	put_prev_task_balance(rq, prev, rf);
 
 	for_each_class(class) {
