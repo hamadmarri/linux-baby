@@ -960,12 +960,17 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 void trigger_load_balance(struct rq *this_rq)
 {
 	struct sched_entity *se;
+	struct rq_flags rf;
 
 	if (!this_rq->idle_balance)
 		goto out;
 
-	if (READ_ONCE(global_ttn))
+	if (READ_ONCE(global_ttn)) {
+		rq_lock(this_rq, &rf);
+		update_rq_clock(this_rq);
 		resched_curr(this_rq);
+		rq_unlock(this_rq, &rf);
+	}
 
 	//GLOBAL_RQ_LOCK_IRQSAVE;
 	//se = pick_next_entity(&this_rq->cfs, NULL);
