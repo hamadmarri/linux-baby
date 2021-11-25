@@ -96,6 +96,16 @@
 struct rq;
 struct cpuidle_state;
 
+extern spinlock_t global_ttn_lock;
+
+extern struct tt_node *global_ttn;
+extern unsigned long global_rf;
+
+#define GLOBAL_RQ_LOCK_IRQSAVE spin_lock_irqsave(&global_ttn_lock, global_rf)
+#define GLOBAL_RQ_UNLOCK_IRQRESTORE spin_unlock_irqrestore(&global_ttn_lock, global_rf)
+#define GLOBAL_RQ_LOCK spin_lock(&global_ttn_lock)
+#define GLOBAL_RQ_UNLOCK spin_unlock(&global_ttn_lock)
+
 /* task_struct::on_rq states: */
 #define TASK_ON_RQ_QUEUED	1
 #define TASK_ON_RQ_MIGRATING	2
