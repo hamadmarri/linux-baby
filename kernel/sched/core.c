@@ -5561,31 +5561,6 @@ __pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	const struct sched_class *class;
 	struct task_struct *p;
 
-	/*
-	 * Optimization: we know that if all tasks are in the fair class we can
-	 * call that function directly, but only if the @prev task wasn't of a
-	 * higher scheduling class, because otherwise those lose the
-	 * opportunity to pull in more work from other CPUs.
-	 */
-	//if (likely(prev->sched_class <= &fair_sched_class // &&
-		   ////rq->nr_running == rq->cfs.h_nr_running
-		   //)) {
-
-		//p = pick_next_task_fair(rq, prev, rf);
-		//if (unlikely(p == RETRY_TASK))
-			//goto restart;
-
-		///* Assume the next prioritized class is idle_sched_class */
-		////if (!p) {
-			////put_prev_task(rq, prev);
-			////p = pick_next_task_idle(rq);
-		////}
-
-		//if (p)
-			//return p;
-	//}
-
-//restart:
 	put_prev_task_balance(rq, prev, rf);
 
 	for_each_class(class) {
