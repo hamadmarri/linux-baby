@@ -11,7 +11,7 @@
 #include "bs.h"
 
 unsigned int __read_mostly tt_max_lifetime	= 22000; // in ms
-int __read_mostly tt_rt_prio			= 0;
+int __read_mostly tt_rt_prio			= -20;
 
 #define INTERACTIVE_HRRN	2U
 #define RT_WAIT_DELTA		800000U
