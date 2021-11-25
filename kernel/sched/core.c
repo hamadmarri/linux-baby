@@ -4598,7 +4598,6 @@ static inline void finish_task(struct task_struct *prev)
 	 * Pairs with the smp_cond_load_acquire() in try_to_wake_up().
 	 */
 	smp_store_release(&prev->on_cpu, 0);
-	//GLOBAL_RQ_UNLOCK_IRQRESTORE;
 #endif
 }
 
@@ -4896,7 +4895,6 @@ static __always_inline struct rq *
 context_switch(struct rq *rq, struct task_struct *prev,
 	       struct task_struct *next, struct rq_flags *rf)
 {
-	//struct rq *ret_rq;
 	prepare_task_switch(rq, prev, next);
 
 	/*
@@ -4944,15 +4942,10 @@ context_switch(struct rq *rq, struct task_struct *prev,
 
 	prepare_lock_switch(rq, next, rf);
 
-	//GLOBAL_RQ_UNLOCK_IRQRESTORE;
-
 	/* Here we just switch the register state and the stack. */
 	switch_to(prev, next, prev);
 	barrier();
 
-	//ret_rq = finish_task_switch(prev);
-	//GLOBAL_RQ_UNLOCK_IRQRESTORE;
-	//return ret_rq;
 	return finish_task_switch(prev);
 }
 
@@ -5065,6 +5058,9 @@ void sched_exec(void)
 	struct task_struct *p = current;
 	unsigned long flags;
 	int dest_cpu;
+
+	if (p->sched_class == &fair_sched_class)
+		return;
 
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 	dest_cpu = p->sched_class->select_task_rq(p, task_cpu(p), WF_EXEC);
@@ -5580,7 +5576,7 @@ __pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 
 		/* Assume the next prioritized class is idle_sched_class */
 		if (!p) {
-			//put_prev_task(rq, prev);
+			put_prev_task(rq, prev);
 			p = pick_next_task_idle(rq);
 		}
 
@@ -6264,8 +6260,6 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 		switch_count = &prev->nvcsw;
 	}
 
-	//GLOBAL_RQ_LOCK_IRQSAVE;
-
 	next = pick_next_task(rq, prev, &rf);
 	clear_tsk_need_resched(prev);
 	clear_preempt_need_resched();
@@ -6303,10 +6297,7 @@ static void __sched notrace __schedule(unsigned int sched_mode)
 
 		/* Also unlocks the rq: */
 		rq = context_switch(rq, prev, next, &rf);
-		//GLOBAL_RQ_UNLOCK_IRQRESTORE;
 	} else {
-		//GLOBAL_RQ_UNLOCK_IRQRESTORE;
-
 		rq->clock_update_flags &= ~(RQCF_ACT_SKIP|RQCF_REQ_SKIP);
 
 		rq_unpin_lock(rq, &rf);

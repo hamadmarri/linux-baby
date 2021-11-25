@@ -460,7 +460,7 @@ static bool yield_to_task_fair(struct rq *rq, struct task_struct *p)
 }
 
 static void
-set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, bool lock)
 {
 	if (se->on_rq) {
 		/*
@@ -469,7 +469,15 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		 * runqueue.
 		 */
 		update_stats_wait_end(cfs_rq, se);
-		__dequeue_entity(cfs_rq, se);
+
+		if (lock) {
+			GLOBAL_RQ_LOCK_IRQSAVE;
+			__dequeue_entity(cfs_rq, se);
+			GLOBAL_RQ_UNLOCK_IRQRESTORE;
+		} else {
+			__dequeue_entity(cfs_rq, se);
+		}
+
 		update_load_avg(cfs_rq, se, UPDATE_TG);
 	}
 
@@ -490,6 +498,55 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	}
 #endif
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
+}
+
+static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev, bool lock)
+{
+	/*
+	 * If still on the runqueue then deactivate_task()
+	 * was not called and update_curr() has to be done:
+	 */
+	if (prev->on_rq) {
+		update_curr(cfs_rq);
+		update_stats_wait_start(cfs_rq, prev);
+
+		if (lock) {
+			GLOBAL_RQ_LOCK_IRQSAVE;
+			__enqueue_entity(cfs_rq, prev);
+			GLOBAL_RQ_UNLOCK_IRQRESTORE;
+		} else {
+			__enqueue_entity(cfs_rq, prev);
+		}
+
+		update_load_avg(cfs_rq, prev, 0);
+	}
+
+	cfs_rq->curr = NULL;
+}
+
+static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
+{
+	struct sched_entity *se = &prev->se;
+
+	put_prev_entity(cfs_rq_of(se), se, true);
+}
+
+static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
+{
+	struct sched_entity *se = &p->se;
+	struct cfs_rq *cfs_rq = cfs_rq_of(se);
+
+#ifdef CONFIG_SMP
+	if (task_on_rq_queued(p)) {
+		/*
+		 * Move the next running task to the front of the list, so our
+		 * cfs_tasks list becomes MRU one.
+		 */
+		list_move(&se->group_node, &rq->cfs_tasks);
+	}
+#endif
+
+	set_next_entity(cfs_rq, se, true);
 }
 
 static int global_can_migrate(struct cfs_rq *cfs_rq,
@@ -649,23 +706,23 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	struct task_struct *p;
 	int new_tasks;
 
-	if (prev)
+	if (prev && prev->sched_class == &fair_sched_class)
 		pse = &prev->se;
 
-	//GLOBAL_RQ_LOCK_IRQSAVE;
 again:
-	GLOBAL_RQ_LOCK_IRQSAVE;
-
-	if (prev) {
-		put_prev_task(rq, prev);
-		prev = NULL;
-	}
+	if (rf)
+		GLOBAL_RQ_LOCK_IRQSAVE;
 
 	se = pick_next_entity(cfs_rq, pse);
 	if (!se)
 		goto idle;
 
-	set_next_entity(cfs_rq, se);
+	if (pse)
+		put_prev_entity(cfs_rq, pse, false);
+	else if (prev)
+		put_prev_task(rq, prev);
+
+	set_next_entity(cfs_rq, se, false);
 	p = task_of(se);
 
 	if (prev)
@@ -673,7 +730,8 @@ again:
 
 	migrate_global(rq, p);
 
-	GLOBAL_RQ_UNLOCK_IRQRESTORE;
+	if (rf)
+		GLOBAL_RQ_UNLOCK_IRQRESTORE;
 
 done: __maybe_unused;
 #ifdef CONFIG_SMP
@@ -690,11 +748,10 @@ done: __maybe_unused;
 	return p;
 
 idle:
-	GLOBAL_RQ_UNLOCK_IRQRESTORE;
-
 	if (!rf)
 		return NULL;
 
+	GLOBAL_RQ_UNLOCK_IRQRESTORE;
 	new_tasks = newidle_balance(rq, rf);
 
 	/*
@@ -705,10 +762,8 @@ idle:
 	if (new_tasks < 0)
 		return RETRY_TASK;
 
-	if (new_tasks > 0) {
-		//BUG_ON(1);
+	if (new_tasks > 0)
 		goto again;
-	}
 
 	/*
 	 * rq is about to be idle, check if we need to update the
@@ -721,7 +776,13 @@ idle:
 
 static struct task_struct *__pick_next_task_fair(struct rq *rq)
 {
-	return pick_next_task_fair(rq, NULL, NULL);
+	struct task_struct *p;
+
+	GLOBAL_RQ_LOCK_IRQSAVE;
+	p = pick_next_task_fair(rq, NULL, NULL);
+	GLOBAL_RQ_UNLOCK_IRQRESTORE;
+
+	return p;
 }
 
 #ifdef CONFIG_SMP
@@ -747,47 +808,6 @@ static struct task_struct *pick_task_fair(struct rq *rq)
 	return task_of(se);
 }
 #endif
-
-static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
-{
-	/*
-	 * If still on the runqueue then deactivate_task()
-	 * was not called and update_curr() has to be done:
-	 */
-	if (prev->on_rq) {
-		update_curr(cfs_rq);
-		update_stats_wait_start(cfs_rq, prev);
-		__enqueue_entity(cfs_rq, prev);
-		update_load_avg(cfs_rq, prev, 0);
-	}
-
-	cfs_rq->curr = NULL;
-}
-
-static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
-{
-	struct sched_entity *se = &prev->se;
-
-	put_prev_entity(cfs_rq_of(se), se);
-}
-
-static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
-{
-	struct sched_entity *se = &p->se;
-	struct cfs_rq *cfs_rq = cfs_rq_of(se);
-
-#ifdef CONFIG_SMP
-	if (task_on_rq_queued(p)) {
-		/*
-		 * Move the next running task to the front of the list, so our
-		 * cfs_tasks list becomes MRU one.
-		 */
-		list_move(&se->group_node, &rq->cfs_tasks);
-	}
-#endif
-
-	set_next_entity(cfs_rq, se);
-}
 
 static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
@@ -959,7 +979,6 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 
 void trigger_load_balance(struct rq *this_rq)
 {
-	struct sched_entity *se;
 	struct rq_flags rf;
 
 	if (!this_rq->idle_balance)
@@ -971,14 +990,6 @@ void trigger_load_balance(struct rq *this_rq)
 		resched_curr(this_rq);
 		rq_unlock(this_rq, &rf);
 	}
-
-	//GLOBAL_RQ_LOCK_IRQSAVE;
-	//se = pick_next_entity(&this_rq->cfs, NULL);
-	//if (se) {
-		//migrate_global(this_rq, task_of(se));
-		////resched_curr(this_rq);
-	//}
-	//GLOBAL_RQ_UNLOCK_IRQRESTORE;
 
 out:
 	if (unlikely(on_null_domain(this_rq) || !cpu_active(cpu_of(this_rq))))
