@@ -543,6 +543,9 @@ void double_rq_lock(struct rq *rq1, struct rq *rq2)
 
 static inline void task_on_rq_hold(struct task_struct *p)
 {
+	if (p->sched_class != &fair_sched_class)
+		return;
+
 	GLOBAL_RQ_LOCK_IRQSAVE;
 	p->on_hold = 1;
 	GLOBAL_RQ_UNLOCK_IRQRESTORE;
