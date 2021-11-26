@@ -543,12 +543,12 @@ void double_rq_lock(struct rq *rq1, struct rq *rq2)
 
 static inline void task_on_rq_hold(struct task_struct *p)
 {
-	if (p->sched_class != &fair_sched_class)
-		return;
+	//if (p->sched_class != &fair_sched_class)
+		//return;
 
-	GLOBAL_RQ_LOCK_IRQSAVE;
-	p->on_hold = 1;
-	GLOBAL_RQ_UNLOCK_IRQRESTORE;
+	//GLOBAL_RQ_LOCK_IRQSAVE;
+	//p->on_hold = 1;
+	//GLOBAL_RQ_UNLOCK_IRQRESTORE;
 }
 
 /*
@@ -5592,7 +5592,10 @@ __pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	put_prev_task_balance(rq, prev, rf);
 
 	for_each_class(class) {
-		p = class->pick_next_task(rq);
+		if (class == &fair_sched_class)
+			p = pick_next_task_fair(rq, prev, rf);
+		else
+			p = class->pick_next_task(rq);
 		if (p)
 			return p;
 	}

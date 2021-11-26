@@ -633,8 +633,8 @@ dequeue_task_migration(struct rq *prev_rq, struct task_struct *p)
 	util_est_dequeue(&prev_rq->cfs, p);
 
 	// dequeue entitiy
-	//update_load_avg(cfs_rq, se, UPDATE_TG); //?
-	//update_stats_dequeue(cfs_rq, se, 0); //?
+	update_load_avg(cfs_rq, se, UPDATE_TG); //?
+	update_stats_dequeue(cfs_rq, se, 0); //?
 
 	se->on_rq = 0;
 	account_entity_dequeue(cfs_rq, se);
@@ -716,40 +716,123 @@ static inline void migrate_global(struct rq *new_rq, struct task_struct *p)
 	//check_preempt_curr(new_rq, p, 0);
 }
 
+static struct rq *g_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
+{
+	struct rq *rq;
+
+	for (;;) {
+		raw_spin_lock(&p->pi_lock);
+		rq = task_rq(p);
+		raw_spin_rq_lock(rq);
+		if (likely(rq == task_rq(p) && !task_on_rq_migrating(p))) {
+			rq_pin_lock(rq, rf);
+			return rq;
+		}
+		raw_spin_rq_unlock(rq);
+		raw_spin_unlock(&p->pi_lock);
+
+		while (unlikely(task_on_rq_migrating(p)))
+			cpu_relax();
+	}
+}
+
+static inline void
+migrate_global_lock(struct rq *new_rq, struct task_struct *p, struct rq_flags *rf)
+{
+	struct rq *prev_rq;
+	unsigned int new_cpu = cpu_of(new_rq);
+	struct rq_flags rf2;
+
+	rq_unpin_lock(new_rq, rf);
+	raw_spin_unlock(&new_rq->__lock);
+
+	prev_rq = g_task_rq_lock(p, &rf2);
+
+	if (prev_rq == new_rq)
+		goto unlock;
+
+	//deactivate_task(prev_rq, p, DEQUEUE_NOCLOCK);
+	//set_task_cpu(p, new_cpu);
+
+	//rq_unpin_lock(prev_rq, &rf);
+	//raw_spin_rq_unlock(prev_rq);
+	//raw_spin_unlock(&p->pi_lock);
+
+	//activate_task(new_rq, p, ENQUEUE_NOCLOCK);
+	//check_preempt_curr(new_rq, p, 0);
+
+	// deactivate_task
+		p->on_rq = TASK_ON_RQ_MIGRATING;
+		//.... dequeue_task
+			sched_info_dequeue(prev_rq, p);
+			psi_dequeue(p, 0);
+			dequeue_task_migration(prev_rq, p);
+	// end deactivate_task
+
+	// set_task_cpu
+		trace_sched_migrate_task(p, new_cpu);
+		//...... migrate_task
+			p->se.avg.last_update_time = 0;
+			YIELD_UNMARK(&p->se.tt_node);
+			update_scan_period(p, new_cpu);
+		//...... end migrate_task
+		p->se.nr_migrations++;
+		rseq_migrate(p);
+		perf_event_task_migrate(p);
+		//...... __set_task_cpu
+			__set_task_cpu(p, new_cpu);
+	// end set_task_cpu
+
+	rq_unpin_lock(prev_rq, &rf2);
+	raw_spin_rq_unlock(prev_rq);
+	raw_spin_unlock(&p->pi_lock);
+
+	raw_spin_lock(&new_rq->__lock);
+	rq_repin_lock(new_rq, rf);
+
+	// activate_task
+		// enqueue_task
+			sched_info_enqueue(new_rq, p);
+			psi_enqueue(p, 0);
+			enqueue_task_migration(new_rq, p);
+		// end enqueue_task
+		p->on_rq = TASK_ON_RQ_QUEUED;
+		//WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
+	// end activate_task
+	check_preempt_curr(new_rq, p, 0);
+
+	return;
+unlock:
+	rq_unpin_lock(prev_rq, &rf2);
+	raw_spin_rq_unlock(prev_rq);
+	raw_spin_unlock(&p->pi_lock);
+
+	raw_spin_lock(&new_rq->__lock);
+	rq_repin_lock(new_rq, rf);
+}
+
 struct task_struct *
 pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
 	struct cfs_rq *cfs_rq = &rq->cfs;
-	struct sched_entity *se, *pse = NULL;
+	struct sched_entity *se;
 	struct task_struct *p;
-	int new_tasks;
 
-	if (prev && prev->sched_class == &fair_sched_class)
-		pse = &prev->se;
+	GLOBAL_RQ_LOCK_IRQSAVE;
 
-again:
-	if (rf)
-		GLOBAL_RQ_LOCK_IRQSAVE;
-
-	se = pick_next_entity(cfs_rq, pse);
+	se = pick_next_entity(cfs_rq, NULL);
 	if (!se)
 		goto idle;
 
-	if (pse)
-		put_prev_entity(cfs_rq, pse, false);
-	else if (prev)
-		put_prev_task(rq, prev);
-
 	set_next_entity(cfs_rq, se, false);
+	GLOBAL_RQ_UNLOCK_IRQRESTORE;
+
 	p = task_of(se);
 
 	if (prev)
 		YIELD_UNMARK(&prev->se.tt_node);
 
-	migrate_global(rq, p);
-
-	if (rf)
-		GLOBAL_RQ_UNLOCK_IRQRESTORE;
+	migrate_global_lock(rq, p, rf);
 
 done: __maybe_unused;
 #ifdef CONFIG_SMP
@@ -766,28 +849,33 @@ done: __maybe_unused;
 	return p;
 
 idle:
-	if (!rf)
-		return NULL;
-
+	//update_idle_rq_clock_pelt(rq);
 	GLOBAL_RQ_UNLOCK_IRQRESTORE;
-	new_tasks = newidle_balance(rq, rf);
+	return NULL;
+
+	//if (!rf)
+		//return NULL;
+
+	// not reachable atm
+	//GLOBAL_RQ_UNLOCK_IRQRESTORE;
+	//new_tasks = newidle_balance(rq, rf);
 
 	/*
 	 * Because newidle_balance() releases (and re-acquires) rq->lock, it is
 	 * possible for any higher priority task to appear. In that case we
 	 * must re-start the pick_next_entity() loop.
 	 */
-	if (new_tasks < 0)
-		return RETRY_TASK;
+	//if (new_tasks < 0)
+		//return RETRY_TASK;
 
-	if (new_tasks > 0)
-		goto again;
+	//if (new_tasks > 0)
+		//goto again;
 
 	/*
 	 * rq is about to be idle, check if we need to update the
 	 * lost_idle_time of clock_pelt
 	 */
-	update_idle_rq_clock_pelt(rq);
+	//update_idle_rq_clock_pelt(rq);
 
 	return NULL;
 }
@@ -796,9 +884,9 @@ static struct task_struct *__pick_next_task_fair(struct rq *rq)
 {
 	struct task_struct *p;
 
-	GLOBAL_RQ_LOCK_IRQSAVE;
+	//GLOBAL_RQ_LOCK_IRQSAVE;
 	p = pick_next_task_fair(rq, NULL, NULL);
-	GLOBAL_RQ_UNLOCK_IRQRESTORE;
+	//GLOBAL_RQ_UNLOCK_IRQRESTORE;
 
 	return p;
 }
