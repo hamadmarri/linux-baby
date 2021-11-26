@@ -1602,11 +1602,21 @@ struct rq *task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 	__acquires(p->pi_lock)
 	__acquires(rq->lock);
 
-static inline void __task_rq_unlock(struct rq *rq, struct rq_flags *rf)
+static inline void task_on_rq_unhold(struct task_struct *p)
+{
+	GLOBAL_RQ_LOCK_IRQSAVE;
+	p->on_hold = 0;
+	GLOBAL_RQ_UNLOCK_IRQRESTORE;
+}
+
+static inline void
+__task_rq_unlock(struct rq *rq, struct task_struct *p, struct rq_flags *rf)
 	__releases(rq->lock)
 {
 	rq_unpin_lock(rq, rf);
 	raw_spin_rq_unlock(rq);
+
+	task_on_rq_unhold(p);
 }
 
 static inline void
@@ -1617,6 +1627,8 @@ task_rq_unlock(struct rq *rq, struct task_struct *p, struct rq_flags *rf)
 	rq_unpin_lock(rq, rf);
 	raw_spin_rq_unlock(rq);
 	raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
+
+	task_on_rq_unhold(p);
 }
 
 static inline void

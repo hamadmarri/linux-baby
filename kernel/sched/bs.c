@@ -555,12 +555,29 @@ static int global_can_migrate(struct cfs_rq *cfs_rq,
 	struct task_struct *p = task_of(se_of(ttn));
 	int this_cpu = cpu_of(rq_of(cfs_rq));
 
-	/* Disregard pcpu kthreads; they are where they need to be. */
-	if (this_cpu != task_cpu(p) && kthread_is_per_cpu(p))
+	///* Disregard pcpu kthreads; they are where they need to be. */
+	//if (this_cpu != task_cpu(p) && kthread_is_per_cpu(p))
+		//return 0;
+
+	//if (!p->on_rq)
+		//return 0;
+
+	/* Either same or different CPUs */
+	if (!task_on_rq_queued(p))
 		return 0;
 
-	if (!p->on_rq)
-		return 0;
+	//if (p->on_hold)
+		//return 0;
+
+	/* Different CPUs */
+	if (this_cpu != task_cpu(p)) {
+		/* Disregard pcpu kthreads; they are where they need to be. */
+		if (kthread_is_per_cpu(p))
+			return 0;
+
+		if (p->on_hold)
+			return 0;
+	}
 
 	if (!cpumask_test_cpu(this_cpu, p->cpus_ptr))
 		return 0;
@@ -666,7 +683,7 @@ static inline void migrate_global(struct rq *new_rq, struct task_struct *p)
 		return;
 
 	// deactivate_task
-		p->on_rq = TASK_ON_RQ_MIGRATING;
+		WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
 		//.... dequeue_task
 			sched_info_dequeue(prev_rq, p);
 			psi_dequeue(p, 0);
@@ -693,7 +710,8 @@ static inline void migrate_global(struct rq *new_rq, struct task_struct *p)
 			psi_enqueue(p, 0);
 			enqueue_task_migration(new_rq, p);
 		// end enqueue_task
-		p->on_rq = TASK_ON_RQ_QUEUED;
+		//p->on_rq = TASK_ON_RQ_QUEUED;
+		WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
 	// end activate_task
 	//check_preempt_curr(new_rq, p, 0);
 }

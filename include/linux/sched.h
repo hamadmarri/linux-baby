@@ -791,6 +791,7 @@ struct task_struct {
 	int				wake_cpu;
 #endif
 	int				on_rq;
+	int				on_hold;
 
 	int				prio;
 	int				static_prio;

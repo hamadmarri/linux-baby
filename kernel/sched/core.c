@@ -541,6 +541,13 @@ void double_rq_lock(struct rq *rq1, struct rq *rq2)
 }
 #endif
 
+static inline void task_on_rq_hold(struct task_struct *p)
+{
+	GLOBAL_RQ_LOCK_IRQSAVE;
+	p->on_hold = 1;
+	GLOBAL_RQ_UNLOCK_IRQRESTORE;
+}
+
 /*
  * __task_rq_lock - lock the rq @p resides on.
  */
@@ -550,6 +557,8 @@ struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 	struct rq *rq;
 
 	lockdep_assert_held(&p->pi_lock);
+
+	task_on_rq_hold(p);
 
 	for (;;) {
 		rq = task_rq(p);
@@ -573,6 +582,8 @@ struct rq *task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 	__acquires(rq->lock)
 {
 	struct rq *rq;
+
+	task_on_rq_hold(p);
 
 	for (;;) {
 		raw_spin_lock_irqsave(&p->pi_lock, rf->flags);
@@ -3620,7 +3631,7 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 		ttwu_do_wakeup(rq, p, wake_flags, &rf);
 		ret = 1;
 	}
-	__task_rq_unlock(rq, &rf);
+	__task_rq_unlock(rq, p, &rf);
 
 	return ret;
 }
@@ -4185,6 +4196,7 @@ int wake_up_state(struct task_struct *p, unsigned int state)
 static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 {
 	p->on_rq			= 0;
+	p->on_hold			= 0;
 
 	p->se.on_rq			= 0;
 	p->se.exec_start		= 0;
