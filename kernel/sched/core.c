@@ -2326,6 +2326,8 @@ static int migration_cpu_stop(void *data)
 	 */
 	flush_smp_call_function_from_idle();
 
+	task_on_rq_hold(p);
+
 	raw_spin_lock(&p->pi_lock);
 	rq_lock(rq, &rf);
 
@@ -2412,6 +2414,8 @@ int push_cpu_stop(void *arg)
 	struct rq *lowest_rq = NULL, *rq = this_rq();
 	struct task_struct *p = arg;
 
+	task_on_rq_hold(p);
+
 	raw_spin_lock_irq(&p->pi_lock);
 	raw_spin_rq_lock(rq);
 
@@ -2445,6 +2449,8 @@ out_unlock:
 	rq->push_busy = false;
 	raw_spin_rq_unlock(rq);
 	raw_spin_unlock_irq(&p->pi_lock);
+
+	task_on_rq_unhold(p);
 
 	put_task_struct(p);
 	return 0;
@@ -3107,6 +3113,9 @@ static int migrate_swap_stop(void *data)
 	src_rq = cpu_rq(arg->src_cpu);
 	dst_rq = cpu_rq(arg->dst_cpu);
 
+	task_on_rq_hold(arg->src_task);
+	task_on_rq_hold(arg->dst_task);
+
 	double_raw_lock(&arg->src_task->pi_lock,
 			&arg->dst_task->pi_lock);
 	double_rq_lock(src_rq, dst_rq);
@@ -3132,6 +3141,9 @@ unlock:
 	double_rq_unlock(src_rq, dst_rq);
 	raw_spin_unlock(&arg->dst_task->pi_lock);
 	raw_spin_unlock(&arg->src_task->pi_lock);
+
+	task_on_rq_unhold(arg->src_task);
+	task_on_rq_unhold(arg->dst_task);
 
 	return ret;
 }
@@ -4153,6 +4165,7 @@ bool try_invoke_on_locked_down_task(struct task_struct *p, bool (*func)(struct t
 		if (task_rq(p) == rq)
 			ret = func(p, arg);
 		rq_unlock(rq, &rf);
+		task_on_rq_unhold(p);
 	} else {
 		switch (READ_ONCE(p->__state)) {
 		case TASK_RUNNING:
@@ -6859,6 +6872,8 @@ out_unlock:
 	__balance_callbacks(rq);
 	raw_spin_rq_unlock(rq);
 
+	task_on_rq_unhold(p);
+
 	preempt_enable();
 }
 #else
@@ -8810,6 +8825,8 @@ static int __balance_push_cpu_stop(void *arg)
 	struct rq_flags rf;
 	int cpu;
 
+	task_on_rq_hold(p);
+
 	raw_spin_lock_irq(&p->pi_lock);
 	rq_lock(rq, &rf);
 
@@ -8822,6 +8839,8 @@ static int __balance_push_cpu_stop(void *arg)
 
 	rq_unlock(rq, &rf);
 	raw_spin_unlock_irq(&p->pi_lock);
+
+	task_on_rq_unhold(p);
 
 	put_task_struct(p);
 
