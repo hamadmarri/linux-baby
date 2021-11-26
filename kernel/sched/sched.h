@@ -1604,7 +1604,9 @@ struct rq *task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 
 static inline void task_on_rq_unhold(struct task_struct *p)
 {
-	if (!READ_ONCE(p->on_hold))
+	int on_hold = READ_ONCE(p->on_hold);
+
+	if (!on_hold)
 		return;
 
 	GLOBAL_RQ_LOCK_IRQSAVE;
