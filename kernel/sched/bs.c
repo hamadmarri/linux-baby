@@ -240,6 +240,38 @@ entity_before(struct tt_node *a, struct tt_node *b)
 	return (int)(HRRN_PERCENT(a, now) - HRRN_PERCENT(b, now)) < 0;
 }
 
+static void __enqueue_entity_port(struct tt_node **port, struct sched_entity *se)
+{
+	struct tt_node *ttn = &se->tt_node;
+
+	ttn->next = ttn->prev = NULL;
+
+	// if empty
+	if (!(*port)) {
+		(*port)		= ttn;
+	}
+	else {
+		ttn->next	= (*port);
+		(*port)->prev	= ttn;
+		(*port)		= ttn;
+	}
+}
+
+static void __dequeue_entity_port(struct tt_node **port, struct sched_entity *se)
+{
+	struct tt_node *ttn = &se->tt_node;
+
+	// if only one se in rq
+	if ((*port)->next == NULL) {
+		(*port) = NULL;
+	}
+	// if it is the head
+	else if (ttn == (*port)) {
+		(*port)		= (*port)->next;
+		(*port)->prev	= NULL; // ??
+	}
+}
+
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct tt_node *ttn = &se->tt_node;
@@ -502,6 +534,83 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	return se_of(ttn);
 }
 
+#define LOCK_RQ(rq, rf) ({ \
+	raw_spin_rq_lock((rq)); \
+	rq_repin_lock((rq), (rf)); \
+})
+
+#define UNLOCK_RQ(rq, rf) ({ \
+	rq_unpin_lock((rq), (rf)); \
+	raw_spin_rq_unlock((rq)); \
+})
+
+// rq_lock_irqsave(grq, &(grf));
+#define LOCK_GRQ(grf) ({ \
+	rq_lock(grq, &(grf)); \
+	update_rq_clock(grq); \
+})
+
+//local_irq_restore((grf).flags);
+#define UNLOCK_GRQ(grf) ({ \
+	rq_unlock(grq, &(grf)); \
+})
+
+/*
+ * Must hold rq lock
+ */
+static void push_to_grq(struct rq *rq, struct rq_flags *rf)
+{
+	struct cfs_rq *cfs_rq = &rq->cfs;
+	struct sched_entity *se;
+	struct tt_node *port = NULL;
+	struct task_struct *p;
+	struct rq_flags local_rf, grf;
+
+	if (rq == grq)
+		return;
+
+	if (!cfs_rq->head)
+		return;
+
+	if (!rf)
+		rf = &local_rf;
+
+	/// dequeue tasks from this rq
+	//while (cfs_rq->head) {
+		//se = se_of(cfs_rq->head);
+		//p = task_of(se);
+
+		//// deactivate
+		//deactivate_task(rq, p, DEQUEUE_NOCLOCK);
+		//// enqueue to port
+		//__enqueue_entity_port(&port, se);
+		////set_task_cpu(p, cpu_of(grq));
+	//}
+
+	cfs_rq->head->vruntime += 1;
+
+	UNLOCK_RQ(rq, rf);
+	LOCK_GRQ(grf);
+
+	if (grq->cfs.head)
+		grq->cfs.head->vruntime += 1;
+
+	/// enqueue tasks to grq
+	//while (port) {
+		//se = se_of(port);
+		//p = task_of(se);
+		//// enqueue to port
+		//__dequeue_entity_port(&port, se);
+
+		//// activate
+		//activate_task(grq, p, ENQUEUE_NOCLOCK);
+		////check_preempt_curr(grq, p, 0); // ??
+	//}
+
+	UNLOCK_GRQ(grf);
+	LOCK_RQ(rq, rf);
+}
+
 struct task_struct *
 pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
@@ -513,6 +622,8 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 again:
 	if (!sched_fair_runnable(rq))
 		goto idle;
+
+	push_to_grq(rq, rf);
 
 	if (prev)
 		put_prev_task(rq, prev);
