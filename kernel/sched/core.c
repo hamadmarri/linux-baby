@@ -9448,10 +9448,6 @@ void __init sched_init(void)
 		struct rq *rq;
 
 		rq = cpu_rq(i);
-
-		if (!grq)
-			grq = rq;
-
 		raw_spin_lock_init(&rq->__lock);
 		rq->nr_running = 0;
 		rq->calc_load_active = 0;
@@ -9497,6 +9493,10 @@ void __init sched_init(void)
 		rq->next_balance = jiffies;
 		rq->push_cpu = 0;
 		rq->cpu = i;
+		if (!grq) {
+			grq = rq;
+			printk(KERN_INFO "Global runqueue is on cpu %d", cpu_of(grq));
+		}
 		rq->online = 0;
 		rq->idle_stamp = 0;
 		rq->avg_idle = 2*sysctl_sched_migration_cost;
