@@ -866,8 +866,13 @@ wake_affine_idle(int this_cpu, int prev_cpu, int sync)
 	return nr_cpumask_bits;
 }
 
+static unsigned long cpu_load(struct rq *rq)
+{
+	return cfs_rq_load_avg(&rq->cfs);
+}
+
 static int
-wake_affine_weight(struct sched_domain *sd, struct task_struct *p,
+wake_affine_weight(struct task_struct *p,
 		   int this_cpu, int prev_cpu, int sync)
 {
 	s64 this_eff_load, prev_eff_load;
@@ -893,8 +898,6 @@ wake_affine_weight(struct sched_domain *sd, struct task_struct *p,
 
 	prev_eff_load = cpu_load(cpu_rq(prev_cpu));
 	prev_eff_load -= task_load;
-	if (sched_feat(WA_BIAS))
-		prev_eff_load *= 100 + (sd->imbalance_pct - 100) / 2;
 	prev_eff_load *= capacity_of(this_cpu);
 
 	/*
@@ -918,7 +921,7 @@ wake_affine(struct task_struct *p, int this_cpu, int prev_cpu, int sync)
 		target = wake_affine_idle(this_cpu, prev_cpu, sync);
 
 	if (sched_feat(WA_WEIGHT) && target == nr_cpumask_bits)
-		target = wake_affine_weight(sd, p, this_cpu, prev_cpu, sync);
+		target = wake_affine_weight(p, this_cpu, prev_cpu, sync);
 
 	schedstat_inc(p->se.statistics.nr_wakeups_affine_attempts);
 	if (target == nr_cpumask_bits)
