@@ -44,6 +44,8 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(sched_update_nr_running_tp);
 
 DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 
+struct rq *grq = NULL;
+
 #ifdef CONFIG_SCHED_DEBUG
 /*
  * Debugging: various feature bits
@@ -9446,6 +9448,10 @@ void __init sched_init(void)
 		struct rq *rq;
 
 		rq = cpu_rq(i);
+
+		if (!grq)
+			grq = rq;
+
 		raw_spin_lock_init(&rq->__lock);
 		rq->nr_running = 0;
 		rq->calc_load_active = 0;

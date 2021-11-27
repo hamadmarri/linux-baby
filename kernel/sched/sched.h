@@ -100,6 +100,8 @@ struct cpuidle_state;
 #define TASK_ON_RQ_QUEUED	1
 #define TASK_ON_RQ_MIGRATING	2
 
+extern struct rq *grq;
+
 extern __read_mostly int scheduler_running;
 
 extern unsigned long calc_load_update;
