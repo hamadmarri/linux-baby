@@ -568,43 +568,43 @@ static void push_to_grq(struct rq *rq, struct rq_flags *rf)
 	if (rq == grq)
 		return;
 
-	if (!cfs_rq->head)
+	if (!cfs_rq->head || !cfs_rq->head->next)
 		return;
 
 	if (!rf)
 		rf = &local_rf;
 
 	/// dequeue tasks from this rq
-	//while (cfs_rq->head) {
-		//se = se_of(cfs_rq->head);
-		//p = task_of(se);
+	while (cfs_rq->head->next) {
+		se = se_of(cfs_rq->head);
+		p = task_of(se);
 
-		//// deactivate
-		//deactivate_task(rq, p, DEQUEUE_NOCLOCK);
-		//// enqueue to port
-		//__enqueue_entity_port(&port, se);
-		////set_task_cpu(p, cpu_of(grq));
-	//}
+		// deactivate
+		deactivate_task(rq, p, DEQUEUE_NOCLOCK);
+		// enqueue to port
+		__enqueue_entity_port(&port, se);
+		//set_task_cpu(p, cpu_of(grq));
+	}
 
-	cfs_rq->head->vruntime += 1;
+	//cfs_rq->head->vruntime += 1;
 
 	UNLOCK_RQ(rq, rf);
 	LOCK_GRQ(grf);
 
-	if (grq->cfs.head)
-		grq->cfs.head->vruntime += 1;
+	//if (grq->cfs.head)
+		//grq->cfs.head->vruntime += 1;
 
 	/// enqueue tasks to grq
-	//while (port) {
-		//se = se_of(port);
-		//p = task_of(se);
-		//// enqueue to port
-		//__dequeue_entity_port(&port, se);
+	while (port) {
+		se = se_of(port);
+		p = task_of(se);
+		// enqueue to port
+		__dequeue_entity_port(&port, se);
 
-		//// activate
-		//activate_task(grq, p, ENQUEUE_NOCLOCK);
-		////check_preempt_curr(grq, p, 0); // ??
-	//}
+		// activate
+		activate_task(grq, p, ENQUEUE_NOCLOCK);
+		//check_preempt_curr(grq, p, 0); // ??
+	}
 
 	UNLOCK_GRQ(grf);
 	LOCK_RQ(rq, rf);
@@ -622,13 +622,19 @@ again:
 	if (!sched_fair_runnable(rq))
 		goto idle;
 
-	push_to_grq(rq, rf);
-
-	if (prev)
+	if (prev) {
 		put_prev_task(rq, prev);
+		//prev = NULL;
+
+		push_to_grq(rq, rf);
+		//goto idle;
+	}
 
 	se = pick_next_entity(cfs_rq, NULL);
 	set_next_entity(cfs_rq, se);
+
+	/* push the rest to grq */
+	push_to_grq(rq, rf);
 
 	p = task_of(se);
 
