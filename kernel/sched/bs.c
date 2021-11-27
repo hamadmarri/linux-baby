@@ -798,9 +798,6 @@ wake_affine(struct task_struct *p, int this_cpu, int prev_cpu, int sync)
 static int
 select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 {
-	struct rq *rq = cpu_rq(prev_cpu);
-	unsigned int min_prev = rq->nr_running;
-	unsigned int min = rq->nr_running;
 	int cpu = smp_processor_id();
 	int this_cpu = smp_processor_id();
 	int new_cpu = prev_cpu;
@@ -827,16 +824,10 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 			return new_cpu;
 		}
 
-		if (cpu_rq(cpu)->nr_running < min) {
-			new_cpu = cpu;
-			min = cpu_rq(cpu)->nr_running;
-		}
+		return new_cpu;
 	}
 
-	if (min == min_prev)
-		return prev_cpu;
-
-	return new_cpu;
+	return smp_processor_id();
 }
 
 /*
