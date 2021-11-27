@@ -544,15 +544,14 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	raw_spin_rq_unlock((rq)); \
 })
 
-// rq_lock_irqsave(grq, &(grf));
 #define LOCK_GRQ(grf) ({ \
-	rq_lock(grq, &(grf)); \
+	rq_lock_irqsave(grq, &(grf)); \
 	update_rq_clock(grq); \
 })
 
-//local_irq_restore((grf).flags);
 #define UNLOCK_GRQ(grf) ({ \
 	rq_unlock(grq, &(grf)); \
+	local_irq_restore((grf).flags); \
 })
 
 /*
