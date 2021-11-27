@@ -560,6 +560,7 @@ struct cfs_rq {
 	struct sched_entity	*curr;
 #ifdef CONFIG_TT_SCHED
 	struct tt_node		*head;
+	u64			local_cand_hrrn;
 #else
 	struct sched_entity	*next;
 	struct sched_entity	*last;
