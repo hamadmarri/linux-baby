@@ -549,8 +549,8 @@ static void yield_task_fair(struct rq *rq)
 	if (unlikely(rq->nr_running == 1))
 		return;
 
-	//if (cfs_rq->h_nr_running > 1)
-		//YIELD_MARK(&curr->se.tt_node);
+	if (cfs_rq->h_nr_running > 1)
+		YIELD_MARK(&curr->se.tt_node);
 
 	if (curr->policy != SCHED_BATCH) {
 		update_rq_clock(rq);
