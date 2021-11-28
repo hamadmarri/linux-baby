@@ -384,6 +384,9 @@ can_be_candidate(struct tt_node *ttn, int this_cpu)
 	if (kthread_is_per_cpu(p))
 		return 0;
 
+	if (IS_CPU_BOUND(ttn))
+		return 0;
+
 	if (task_running(cpu_rq(this_cpu), p))
 		return 0;
 
