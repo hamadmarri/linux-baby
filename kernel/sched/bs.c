@@ -345,16 +345,13 @@ static inline int clear_this_candidate(struct sched_entity *se)
 {
 	struct tt_node *ttn = &se->tt_node;
 	struct tt_node *curr_can = READ_ONCE(global_candidate.candidate);
-	unsigned long flags;
 
 	if (ttn != curr_can)
 		return 0;
 
-	raw_spin_lock_irqsave(&global_candidate.lock, flags);
-	WRITE_ONCE(global_candidate.rq, NULL);
 	WRITE_ONCE(global_candidate.candidate, NULL);
+	WRITE_ONCE(global_candidate.rq, NULL);
 	WRITE_ONCE(global_candidate.hrrn, MAX_HRRN);
-	raw_spin_unlock_irqrestore(&global_candidate.lock, flags);
 
 	return 1;
 }
@@ -363,16 +360,13 @@ static inline int clear_this_candidate(struct sched_entity *se)
 static inline void clear_rq_candidate(struct cfs_rq *cfs_rq)
 {
 	struct rq *rq = READ_ONCE(global_candidate.rq);
-	unsigned long flags;
 
 	if (rq != rq_of(cfs_rq))
 		return;
 
-	raw_spin_lock_irqsave(&global_candidate.lock, flags);
-	WRITE_ONCE(global_candidate.rq, NULL);
 	WRITE_ONCE(global_candidate.candidate, NULL);
+	WRITE_ONCE(global_candidate.rq, NULL);
 	WRITE_ONCE(global_candidate.hrrn, MAX_HRRN);
-	raw_spin_unlock_irqrestore(&global_candidate.lock, flags);
 }
 
 static inline bool
@@ -412,9 +406,9 @@ static void __update_candidate(struct cfs_rq *cfs_rq, struct tt_node *ttn)
 
 	if ((s64)(hrrn - curr_can_hrrn) < 0) {
 		raw_spin_lock_irqsave(&global_candidate.lock, flags);
-		WRITE_ONCE(global_candidate.rq, rq_of(cfs_rq));
-		WRITE_ONCE(global_candidate.candidate, ttn);
-		WRITE_ONCE(global_candidate.hrrn, hrrn);
+		global_candidate.rq = rq_of(cfs_rq);
+		global_candidate.candidate = ttn;
+		global_candidate.hrrn = hrrn;
 		raw_spin_unlock_irqrestore(&global_candidate.lock, flags);
 	}
 }
@@ -1211,9 +1205,9 @@ int idle_pull_global_candidate(struct rq *dist_rq)
 			    !can_migrate_candidate(p, dist_rq, src_rq))
 				goto fail_unlock;
 
-			WRITE_ONCE(global_candidate.rq, NULL);
-			WRITE_ONCE(global_candidate.candidate, NULL);
-			WRITE_ONCE(global_candidate.hrrn, MAX_HRRN);
+			global_candidate.rq = NULL;
+			global_candidate.candidate = NULL;
+			global_candidate.hrrn = MAX_HRRN;
 		raw_spin_unlock(&global_candidate.lock);
 
 		// detach task
@@ -1378,9 +1372,9 @@ static void active_pull_global_candidate(struct rq *dist_rq, int check_preempt)
 			if ((s64)(local_hrrn - cand_hrrn) >= 0)
 				goto fail_unlock;
 
-			WRITE_ONCE(global_candidate.rq, NULL);
-			WRITE_ONCE(global_candidate.candidate, NULL);
-			WRITE_ONCE(global_candidate.hrrn, MAX_HRRN);
+			global_candidate.rq = NULL;
+			global_candidate.candidate = NULL;
+			global_candidate.hrrn = MAX_HRRN;
 		raw_spin_unlock(&global_candidate.lock);
 
 		// detach task
