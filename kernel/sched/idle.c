@@ -479,6 +479,15 @@ dequeue_task_idle(struct rq *rq, struct task_struct *p, int flags)
  */
 static void task_tick_idle(struct rq *rq, struct task_struct *curr, int queued)
 {
+	struct rq_flags rf;
+
+	rq_unpin_lock(rq, &rf);
+	raw_spin_unlock(&rq->__lock);
+
+	idle_pull_global_candidate(rq);
+
+	raw_spin_lock(&rq->__lock);
+	rq_repin_lock(rq, &rf);
 }
 
 static void switched_to_idle(struct rq *rq, struct task_struct *p)
