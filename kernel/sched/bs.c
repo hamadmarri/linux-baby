@@ -1051,6 +1051,36 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 	return new_cpu;
 }
 
+/*
+ * Is this task likely cache-hot:
+ */
+static int task_hot(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+{
+	s64 delta;
+
+	lockdep_assert_rq_held(src_rq);
+
+	if (p->sched_class != &fair_sched_class)
+		return 0;
+
+	if (unlikely(task_has_idle_policy(p)))
+		return 0;
+
+	/* SMT siblings share cache */
+	if (cpus_share_cache(cpu_of(dst_rq), cpu_of(src_rq)))
+		return 0;
+
+	if (sysctl_sched_migration_cost == -1)
+		return 1;
+
+	if (sysctl_sched_migration_cost == 0)
+		return 0;
+
+	delta = sched_clock() - p->se.exec_start;
+
+	return delta < (s64)sysctl_sched_migration_cost;
+}
+
 #ifdef CONFIG_NUMA_BALANCING
 /*
  * Returns 1, if task migration degrades locality
@@ -1112,6 +1142,86 @@ static inline int migrate_degrades_locality(struct task_struct *p,
 static int
 can_migrate_task(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
 {
+	int tsk_cache_hot;
+
+	/* Disregard pcpu kthreads; they are where they need to be. */
+	if (kthread_is_per_cpu(p))
+		return 0;
+
+	if (!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr))
+		return 0;
+
+	if (task_running(src_rq, p))
+		return 0;
+
+	tsk_cache_hot = migrate_degrades_locality(p, dst_rq, src_rq);
+	if (tsk_cache_hot == -1)
+		tsk_cache_hot = task_hot(p, dst_rq, src_rq);
+
+	if (tsk_cache_hot > 0)
+		return 0;
+
+	return 1;
+}
+
+static void pull_from(struct rq *dist_rq,
+		      struct rq *src_rq,
+		      struct rq_flags *src_rf,
+		      struct task_struct *p)
+{
+	struct rq_flags rf;
+
+	// detach task
+	deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
+	set_task_cpu(p, cpu_of(dist_rq));
+
+	// unlock src rq
+	rq_unlock(src_rq, src_rf);
+
+	// lock dist rq
+	rq_lock(dist_rq, &rf);
+	update_rq_clock(dist_rq);
+
+	activate_task(dist_rq, p, ENQUEUE_NOCLOCK);
+	check_preempt_curr(dist_rq, p, 0);
+
+	// unlock dist rq
+	rq_unlock(dist_rq, &rf);
+
+	local_irq_restore(src_rf->flags);
+}
+
+static int move_task(struct rq *dist_rq, struct rq *src_rq,
+			struct rq_flags *src_rf)
+{
+	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
+	struct task_struct *p;
+	struct tt_node *ttn = src_cfs_rq->head;
+
+	while (ttn) {
+		p = task_of(se_of(ttn));
+		if (can_migrate_task(p, dist_rq, src_rq)) {
+			pull_from(dist_rq, src_rq, src_rf, p);
+			return 1;
+		}
+
+		ttn = ttn->next;
+	}
+
+	/*
+	 * Here we know we have not migrated any task,
+	 * thus, we need to unlock and return 0
+	 * Note: the pull_from does the unlocking for us.
+	 */
+	rq_unlock(src_rq, src_rf);
+	local_irq_restore(src_rf->flags);
+
+	return 0;
+}
+
+static int
+can_migrate_candidate(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+{
 	/* Disregard pcpu kthreads; they are where they need to be. */
 	if (kthread_is_per_cpu(p))
 		return 0;
@@ -1148,7 +1258,7 @@ int idle_pull_global_candidate(struct rq *dist_rq)
 
 			p = task_of(se_of(cand));
 			if (task_rq(p) != src_rq ||
-			    !can_migrate_task(p, dist_rq, src_rq))
+			    !can_migrate_candidate(p, dist_rq, src_rq))
 				goto fail_unlock;
 
 			WRITE_ONCE(global_candidate.rq, NULL);
@@ -1191,7 +1301,11 @@ static inline int on_null_domain(struct rq *rq)
 static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 {
 	int this_cpu = this_rq->cpu;
+	struct rq *src_rq;
+	int src_cpu = -1, cpu;
 	int pulled_task = 0;
+	unsigned int max = 0;
+	struct rq_flags src_rf;
 
 	/*
 	 * We must set idle_stamp _before_ calling idle_balance(), such that we
@@ -1211,7 +1325,46 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 	update_blocked_averages(this_cpu);
 
 	pulled_task = idle_pull_global_candidate(this_rq);
+	if (pulled_task)
+		goto out;
 
+	for_each_online_cpu(cpu) {
+		/*
+		 * Stop searching for tasks to pull if there are
+		 * now runnable tasks on this rq.
+		 */
+		if (this_rq->nr_running > 0)
+			goto out;
+
+		if (cpu == this_cpu)
+			continue;
+
+		src_rq = cpu_rq(cpu);
+
+		if (src_rq->nr_running < 2)
+			continue;
+
+		if (src_rq->nr_running > max) {
+			max = src_rq->nr_running;
+			src_cpu = cpu;
+		}
+	}
+
+	if (src_cpu != -1) {
+		src_rq = cpu_rq(src_cpu);
+
+		rq_lock_irqsave(src_rq, &src_rf);
+		update_rq_clock(src_rq);
+
+		if (src_rq->nr_running < 2) {
+			rq_unlock(src_rq, &src_rf);
+			local_irq_restore(src_rf.flags);
+		} else {
+			pulled_task = move_task(this_rq, src_rq, &src_rf);
+		}
+	}
+
+out:
 	raw_spin_lock(&this_rq->__lock);
 
 	/*
@@ -1269,7 +1422,7 @@ static void active_pull_global_candidate(struct rq *dist_rq, int check_preempt)
 
 			p = task_of(se_of(cand));
 			if (task_rq(p) != src_rq ||
-			    !can_migrate_task(p, dist_rq, src_rq))
+			    !can_migrate_candidate(p, dist_rq, src_rq))
 				goto fail_unlock;
 
 			if ((s64)(local_hrrn - cand_hrrn) >= 0)
@@ -1309,6 +1462,12 @@ fail_unlock:
 
 void trigger_load_balance(struct rq *rq)
 {
+	int this_cpu = cpu_of(rq);
+	int cpu;
+	unsigned int max, min;
+	struct rq *max_rq, *min_rq, *c_rq;
+	struct rq_flags src_rf;
+
 	if (unlikely(on_null_domain(rq) || !cpu_active(cpu_of(rq))))
 		return;
 
@@ -1319,6 +1478,48 @@ void trigger_load_balance(struct rq *rq)
 	else
 		active_pull_global_candidate(rq, 1);
 
+	if (this_cpu != 0)
+		goto out;
+
+	max = min = rq->nr_running;
+	max_rq = min_rq = rq;
+
+	for_each_online_cpu(cpu) {
+		c_rq = cpu_rq(cpu);
+
+		/*
+		 * Don't need to rebalance while attached to NULL domain or
+		 * runqueue CPU is not active
+		 */
+		if (unlikely(on_null_domain(c_rq) || !cpu_active(cpu)))
+			continue;
+
+		if (c_rq->nr_running < min) {
+			min = c_rq->nr_running;
+			min_rq = c_rq;
+		}
+
+		if (c_rq->nr_running > max) {
+			max = c_rq->nr_running;
+			max_rq = c_rq;
+		}
+	}
+
+	if (min_rq == max_rq || max - min < 2)
+		goto out;
+
+	rq_lock_irqsave(max_rq, &src_rf);
+	update_rq_clock(max_rq);
+
+	if (max_rq->nr_running < 2) {
+		rq_unlock(max_rq, &src_rf);
+		local_irq_restore(src_rf.flags);
+		goto out;
+	}
+
+	move_task(min_rq, max_rq, &src_rf);
+
+out:
 #ifdef CONFIG_TT_ACCOUNTING_STATS
 	if (time_after_eq(jiffies, rq->next_balance)) {
 		/* scale ms to jiffies */

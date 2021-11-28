@@ -448,9 +448,53 @@ static bool update_nohz_stats(struct rq *rq)
 	return rq->has_blocked_load;
 }
 
-static inline void idle_balance(struct rq *this_rq)
+static void idle_balance(struct rq *this_rq)
 {
-	idle_pull_global_candidate(this_rq);
+	int this_cpu = this_rq->cpu;
+	struct rq *src_rq;
+	int src_cpu = -1, cpu;
+	unsigned int max = 0;
+	struct rq_flags src_rf;
+
+	if (idle_pull_global_candidate(this_rq))
+		return;
+
+	for_each_online_cpu(cpu) {
+		/*
+		 * Stop searching for tasks to pull if there are
+		 * now runnable tasks on this rq.
+		 */
+		if (this_rq->nr_running > 0)
+			return;
+
+		if (cpu == this_cpu)
+			continue;
+
+		src_rq = cpu_rq(cpu);
+
+		if (src_rq->nr_running < 2)
+			continue;
+
+		if (src_rq->nr_running > max) {
+			max = src_rq->nr_running;
+			src_cpu = cpu;
+		}
+	}
+
+	if (src_cpu == -1)
+		return;
+
+	src_rq = cpu_rq(src_cpu);
+
+	rq_lock_irqsave(src_rq, &src_rf);
+	update_rq_clock(src_rq);
+
+	if (src_rq->nr_running < 2) {
+		rq_unlock(src_rq, &src_rf);
+		local_irq_restore(src_rf.flags);
+	} else {
+		move_task(this_rq, src_rq, &src_rf);
+	}
 }
 
 /*
