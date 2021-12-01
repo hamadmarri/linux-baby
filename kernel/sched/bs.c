@@ -1409,29 +1409,29 @@ fail_unlock:
 	local_irq_restore(src_rf.flags);
 }
 
-void trigger_load_balance(struct rq *rq)
+void trigger_load_balance(struct rq *this_rq)
 {
-	int this_cpu = cpu_of(rq);
+	int this_cpu = cpu_of(this_rq);
 	int cpu;
 	unsigned int max, min;
 	struct rq *max_rq, *min_rq, *c_rq;
 	struct rq_flags src_rf;
 
-	if (unlikely(on_null_domain(rq) || !cpu_active(cpu_of(rq))))
+	if (unlikely(on_null_domain(this_rq) || !cpu_active(cpu_of(this_rq))))
 		return;
 
-	nohz_balancer_kick(rq);
+	nohz_balancer_kick(this_rq);
 
-	if (rq->idle_balance || !sched_fair_runnable(rq))
-		idle_pull_global_candidate(rq);
+	if (this_rq->idle_balance || !sched_fair_runnable(this_rq))
+		idle_pull_global_candidate(this_rq);
 	else
-		active_pull_global_candidate(rq, 1);
+		active_pull_global_candidate(this_rq, 1);
 
 	if (this_cpu != 0)
 		goto out;
 
-	max = min = rq->nr_running;
-	max_rq = min_rq = rq;
+	max = min = this_rq->nr_running;
+	max_rq = min_rq = this_rq;
 
 	for_each_online_cpu(cpu) {
 		c_rq = cpu_rq(cpu);
@@ -1470,12 +1470,12 @@ void trigger_load_balance(struct rq *rq)
 
 out:
 #ifdef CONFIG_TT_ACCOUNTING_STATS
-	if (time_after_eq(jiffies, rq->next_balance)) {
+	if (time_after_eq(jiffies, this_rq->next_balance)) {
 		/* scale ms to jiffies */
 		unsigned long interval = msecs_to_jiffies(19);
 
-		rq->next_balance = jiffies + interval;
-		update_blocked_averages(rq->cpu);
+		this_rq->next_balance = jiffies + interval;
+		update_blocked_averages(this_rq->cpu);
 	}
 #endif
 }
