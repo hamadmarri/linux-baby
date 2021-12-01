@@ -372,28 +372,33 @@ static inline void clear_rq_candidate(struct cfs_rq *cfs_rq)
 static inline bool
 can_be_candidate(struct tt_node *ttn, int this_cpu)
 {
-	int cpu;
 	struct task_struct *p = task_of(se_of(ttn));
 
 	if (kthread_is_per_cpu(p))
 		return 0;
 
-	if (IS_CPU_BOUND(ttn))
+	/*
+	 * only realtime and interactive can
+	 * be candidates
+	 */
+	if (ttn->task_type > TT_INTERACTIVE)
+		return 0;
+
+	// just migrated
+	if (p->se.avg.last_update_time == 0)
 		return 0;
 
 	if (task_running(cpu_rq(this_cpu), p))
 		return 0;
 
 	// some tasks are pinned to this cpu
-	for_each_online_cpu(cpu) {
-		if (cpu == this_cpu)
-			continue;
+	if (p->nr_cpus_allowed <= 1)
+		return 0;
 
-		if (cpumask_test_cpu(cpu, p->cpus_ptr))
-			return 1;
-	}
+	if (is_migration_disabled(p))
+		return 0;
 
-	return 0;
+	return 1;
 }
 
 static void __update_candidate(struct cfs_rq *cfs_rq, struct tt_node *ttn)
