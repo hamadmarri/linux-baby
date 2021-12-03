@@ -1381,7 +1381,7 @@ static void active_pull_global_candidate(struct rq *dist_rq, int check_preempt)
 	if (!cand)
 		return;
 
-	if ((s64)(local_hrrn- cand_hrrn) >= 0)
+	if ((s64)(local_hrrn - cand_hrrn) >= 0)
 		return;
 
 	src_rq = READ_ONCE(global_candidate.rq);
