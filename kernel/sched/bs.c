@@ -118,7 +118,9 @@ static inline bool is_batch(struct tt_node *ttn, u64 _hrrn)
 static void detect_type(struct tt_node *ttn, u64 now, int flags)
 {
 	unsigned int new_type = TT_NO_TYPE;
+	unsigned int old_type = ttn->task_type;
 	u64 _hrrn;
+	unsigned int cpu;
 
 	if (ttn->vruntime == 1) {
 		ttn->task_type = TT_NO_TYPE;
@@ -141,6 +143,23 @@ static void detect_type(struct tt_node *ttn, u64 now, int flags)
 	} else if (IS_REALTIME(ttn) && ttn->rt_sticky) {
 		ttn->rt_sticky--;
 		return;
+	}
+
+	if (new_type != old_type) {
+		cpu = task_cpu(task_of(se_of(ttn)));
+
+		/*
+		 * Recall:
+		 * TT_REALTIME		0
+		 * TT_INTERACTIVE	1
+		 * TT_NO_TYPE		2
+		 * TT_CPU_BOUND		3
+		 * TT_BATCH		4
+		 */
+		if (new_type == 1 && old_type != 1)
+			per_cpu(nr_lat_sensitive, cpu)++;
+		else if (old_type == 1 && new_type != 1)
+			dec_nr_lat_sensitive(cpu);
 	}
 
 	ttn->task_type = new_type;
@@ -448,6 +467,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	struct tt_node *ttn = &se->tt_node;
 	bool sleep = (flags & DEQUEUE_SLEEP);
+	u64 avg_wait;
 
 	if (sleep) {
 		ttn->prev_burst = ttn->burst;
@@ -456,6 +476,14 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 		if (IS_CPU_BOUND(ttn))
 			ttn->task_type = TT_BATCH;
+		else if (IS_REALTIME(ttn)) {
+			avg_wait = ttn->prev_wait_time;
+			avg_wait += ttn->wait_time;
+			avg_wait /= 2ULL;
+
+			if (LEQ(avg_wait, HZ_PERIOD))
+				per_cpu(nr_lat_sensitive, cpu_of(rq_of(cfs_rq)))++;
+		}
 	}
 
 	update_curr(cfs_rq);
@@ -1471,13 +1499,14 @@ void trigger_load_balance(struct rq *this_rq)
 out:
 #ifdef CONFIG_TT_ACCOUNTING_STATS
 	if (time_after_eq(jiffies, this_rq->next_balance)) {
-		/* scale ms to jiffies */
-		unsigned long interval = msecs_to_jiffies(19);
-
-		this_rq->next_balance = jiffies + interval;
+		this_rq->next_balance = jiffies + msecs_to_jiffies(19);
 		update_blocked_averages(this_rq->cpu);
 	}
 #endif
+	if (time_after_eq(jiffies, this_rq->lat_decay)) {
+		this_rq->lat_decay = jiffies + msecs_to_jiffies(4);
+		dec_nr_lat_sensitive(this_rq->cpu);
+	}
 }
 
 void update_group_capacity(struct sched_domain *sd, int cpu) {}
