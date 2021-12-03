@@ -115,7 +115,7 @@ static int sixty = 60;
 
 #ifdef CONFIG_TT_SCHED
 static int neg_twenty	= -20;
-static int thirty_nine	= 39;
+static int nineteen	= 19;
 #endif
 static int __maybe_unused neg_one = -1;
 static int __maybe_unused two = 2;
@@ -1797,7 +1797,7 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &neg_twenty,
-		.extra2		= &thirty_nine,
+		.extra2		= &nineteen,
 	},
 #endif
 #ifdef CONFIG_SCHEDSTATS
