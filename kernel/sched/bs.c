@@ -742,6 +742,9 @@ again:
 
 	p = task_of(se);
 
+	if (prev)
+		YIELD_UNMARK(&prev->se.tt_node);
+
 done: __maybe_unused;
 #ifdef CONFIG_SMP
 	/*
@@ -834,7 +837,6 @@ static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
 {
 	struct sched_entity *se = &prev->se;
 
-	YIELD_UNMARK(&prev->se.tt_node);
 	put_prev_entity(cfs_rq_of(se), se);
 }
 
