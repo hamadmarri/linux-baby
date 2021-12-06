@@ -5630,7 +5630,11 @@ restart:
 	put_prev_task_balance(rq, prev, rf);
 
 	for_each_class(class) {
-		p = class->pick_next_task(rq);
+		if (class == &fair_sched_class)
+			p = pick_next_task_fair(rq, NULL, rf);
+		else
+			p = class->pick_next_task(rq);
+
 		if (p)
 			return p;
 	}

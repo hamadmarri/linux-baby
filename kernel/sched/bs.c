@@ -554,6 +554,20 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	local_irq_restore((grf).flags); \
 })
 
+static int task_can_move_to_grq(struct task_struct *p)
+{
+	if (task_running(task_rq(p), p))
+		return 0;
+
+	if (kthread_is_per_cpu(p))
+		return 0;
+
+	if (is_migration_disabled(p))
+		return 0;
+
+	return 1;
+}
+
 /*
  * Must hold rq lock
  */
@@ -561,38 +575,43 @@ static void push_to_grq(struct rq *rq, struct rq_flags *rf)
 {
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	struct sched_entity *se;
-	struct tt_node *port = NULL;
+	struct tt_node *ttn, *next, *port = NULL;
 	struct task_struct *p;
-	struct rq_flags local_rf, grf;
+	struct rq_flags grf;
 
 	if (rq == grq)
 		return;
 
-	if (!cfs_rq->head || !cfs_rq->head->next)
+	if (!cfs_rq->head)
 		return;
 
-	if (!rf)
-		rf = &local_rf;
-
 	/// dequeue tasks from this rq
-	while (cfs_rq->head->next) {
-		se = se_of(cfs_rq->head);
+	ttn = cfs_rq->head;
+	while (ttn) {
+		next = ttn->next;
+
+		se = se_of(ttn);
 		p = task_of(se);
+
+		if (!task_can_move_to_grq(p))
+			goto next;
 
 		// deactivate
 		deactivate_task(rq, p, DEQUEUE_NOCLOCK);
 		// enqueue to port
 		__enqueue_entity_port(&port, se);
-		//set_task_cpu(p, cpu_of(grq));
+
+		set_task_cpu(p, cpu_of(grq));
+
+next:
+		ttn = next;
 	}
 
-	//cfs_rq->head->vruntime += 1;
+	if (!port)
+		return;
 
 	UNLOCK_RQ(rq, rf);
 	LOCK_GRQ(grf);
-
-	//if (grq->cfs.head)
-		//grq->cfs.head->vruntime += 1;
 
 	/// enqueue tasks to grq
 	while (port) {
@@ -603,11 +622,115 @@ static void push_to_grq(struct rq *rq, struct rq_flags *rf)
 
 		// activate
 		activate_task(grq, p, ENQUEUE_NOCLOCK);
-		//check_preempt_curr(grq, p, 0); // ??
 	}
 
 	UNLOCK_GRQ(grf);
 	LOCK_RQ(rq, rf);
+}
+
+static int
+can_migrate_task_grq(struct tt_node *ttn, struct rq *dst_rq)
+{
+	struct task_struct *p = task_of(se_of(ttn));
+
+	if (kthread_is_per_cpu(p))
+		return 0;
+
+	if (!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr))
+		return 0;
+
+	if (task_running(grq, p))
+		return 0;
+
+	return 1;
+}
+
+static struct sched_entity *
+pick_next_entity_from_grq(struct rq *dist_rq)
+{
+	struct tt_node *ttn = grq->cfs.head;
+	struct tt_node *next;
+
+	while (ttn && !can_migrate_task_grq(ttn, dist_rq))
+		ttn = ttn->next;
+
+	if (!ttn)
+		return NULL;
+
+	next = ttn->next;
+	while (next) {
+		if (can_migrate_task_grq(next, dist_rq) && entity_before(next, ttn))
+			ttn = next;
+
+		next = next->next;
+	}
+
+	return se_of(ttn);
+}
+
+static void push_to_grq_and_pull(struct rq *rq, struct rq_flags *rf)
+{
+	struct cfs_rq *cfs_rq = &rq->cfs;
+	struct sched_entity *se;
+	struct tt_node *ttn, *next, *port = NULL;
+	struct task_struct *p;
+	struct rq_flags grf;
+
+	if (rq == grq)
+		return;
+
+	if (!cfs_rq->head)
+		return;
+
+	/// dequeue tasks from this rq
+	ttn = cfs_rq->head;
+	while (ttn) {
+		next = ttn->next;
+
+		se = se_of(ttn);
+		p = task_of(se);
+
+		if (!task_can_move_to_grq(p))
+			goto next;
+
+		// deactivate
+		deactivate_task(rq, p, DEQUEUE_NOCLOCK);
+		// enqueue to port
+		__enqueue_entity_port(&port, se);
+
+		set_task_cpu(p, cpu_of(grq));
+
+next:
+		ttn = next;
+	}
+
+	UNLOCK_RQ(rq, rf);
+	LOCK_GRQ(grf);
+
+	/// enqueue tasks to grq
+	while (port) {
+		se = se_of(port);
+		p = task_of(se);
+		// enqueue to port
+		__dequeue_entity_port(&port, se);
+
+		// activate
+		activate_task(grq, p, ENQUEUE_NOCLOCK);
+	}
+
+	p = NULL;
+	se = pick_next_entity_from_grq(rq);
+	if (se) {
+		p = task_of(se);
+		deactivate_task(grq, p, DEQUEUE_NOCLOCK);
+		set_task_cpu(p, cpu_of(rq));
+	}
+
+	UNLOCK_GRQ(grf);
+	LOCK_RQ(rq, rf);
+
+	if (p)
+		activate_task(rq, p, ENQUEUE_NOCLOCK);
 }
 
 struct task_struct *
@@ -618,17 +741,14 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	struct task_struct *p;
 	int new_tasks;
 
+	push_to_grq_and_pull(rq, rf);
+
 again:
 	if (!sched_fair_runnable(rq))
 		goto idle;
 
-	if (prev) {
+	if (prev)
 		put_prev_task(rq, prev);
-		//prev = NULL;
-
-		push_to_grq(rq, rf);
-		//goto idle;
-	}
 
 	se = pick_next_entity(cfs_rq, NULL);
 	set_next_entity(cfs_rq, se);
@@ -637,9 +757,6 @@ again:
 	push_to_grq(rq, rf);
 
 	p = task_of(se);
-
-	if (prev)
-		YIELD_UNMARK(&prev->se.tt_node);
 
 done: __maybe_unused;
 #ifdef CONFIG_SMP
@@ -730,6 +847,7 @@ static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
 {
 	struct sched_entity *se = &prev->se;
 
+	YIELD_UNMARK(&prev->se.tt_node);
 	put_prev_entity(cfs_rq_of(se), se);
 }
 
@@ -946,132 +1064,35 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 	return smp_processor_id();
 }
 
-/*
- * Is this task likely cache-hot:
- */
-static int task_hot(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
-{
-	s64 delta;
-
-	lockdep_assert_rq_held(src_rq);
-
-	if (p->sched_class != &fair_sched_class)
-		return 0;
-
-	if (unlikely(task_has_idle_policy(p)))
-		return 0;
-
-	/* SMT siblings share cache */
-	if (cpus_share_cache(cpu_of(dst_rq), cpu_of(src_rq)))
-		return 0;
-
-	if (sysctl_sched_migration_cost == -1)
-		return 1;
-
-	if (sysctl_sched_migration_cost == 0)
-		return 0;
-
-	delta = sched_clock() - p->se.exec_start;
-
-	return delta < (s64)sysctl_sched_migration_cost;
-}
-
-#ifdef CONFIG_NUMA_BALANCING
-/*
- * Returns 1, if task migration degrades locality
- * Returns 0, if task migration improves locality i.e migration preferred.
- * Returns -1, if task migration is not affected by locality.
- */
-static int
-migrate_degrades_locality(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
-{
-	struct numa_group *numa_group = rcu_dereference(p->numa_group);
-	unsigned long src_weight, dst_weight;
-	int src_nid, dst_nid, dist;
-
-	if (!static_branch_likely(&sched_numa_balancing))
-		return -1;
-
-	src_nid = cpu_to_node(cpu_of(src_rq));
-	dst_nid = cpu_to_node(cpu_of(dst_rq));
-
-	if (src_nid == dst_nid)
-		return -1;
-
-	/* Migrating away from the preferred node is always bad. */
-	if (src_nid == p->numa_preferred_nid) {
-		if (src_rq->nr_running > src_rq->nr_preferred_running)
-			return 1;
-		else
-			return -1;
-	}
-
-	/* Encourage migration to the preferred node. */
-	if (dst_nid == p->numa_preferred_nid)
-		return 0;
-
-	/* Leaving a core idle is often worse than degrading locality. */
-	if (dst_rq->idle_balance)
-		return -1;
-
-	dist = node_distance(src_nid, dst_nid);
-	if (numa_group) {
-		src_weight = group_weight(p, src_nid, dist);
-		dst_weight = group_weight(p, dst_nid, dist);
-	} else {
-		src_weight = task_weight(p, src_nid, dist);
-		dst_weight = task_weight(p, dst_nid, dist);
-	}
-
-	return dst_weight < src_weight;
-}
-
-#else
-static inline int migrate_degrades_locality(struct task_struct *p,
-					     struct rq *dst_rq, struct rq *src_rq)
-{
-	return -1;
-}
-#endif
-
-static int
-can_migrate_task(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
-{
-	int tsk_cache_hot;
-
-	/* Disregard pcpu kthreads; they are where they need to be. */
-	if (kthread_is_per_cpu(p))
-		return 0;
-
-	if (!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr))
-		return 0;
-
-	if (task_running(src_rq, p))
-		return 0;
-
-	tsk_cache_hot = migrate_degrades_locality(p, dst_rq, src_rq);
-	if (tsk_cache_hot == -1)
-		tsk_cache_hot = task_hot(p, dst_rq, src_rq);
-
-	if (tsk_cache_hot > 0)
-		return 0;
-
-	return 1;
-}
-
-static void pull_from(struct rq *dist_rq,
-		      struct rq *src_rq,
-		      struct rq_flags *src_rf,
-		      struct task_struct *p)
+static int pull_from_grq(struct rq *dist_rq)
 {
 	struct rq_flags rf;
+	struct rq_flags grf;
+	struct sched_entity *se;
+	struct task_struct *p = NULL;
+
+	if (dist_rq == grq)
+		return 0;
+
+	rq_lock_irqsave(grq, &grf);
+	update_rq_clock(grq);
+
+	se = pick_next_entity_from_grq(dist_rq);
+
+	if (!se) {
+		rq_unlock(grq, &grf);
+		local_irq_restore(grf.flags);
+		return 0;
+	}
+
+	p = task_of(se);
 
 	// detach task
-	deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
+	deactivate_task(grq, p, DEQUEUE_NOCLOCK);
 	set_task_cpu(p, cpu_of(dist_rq));
 
 	// unlock src rq
-	rq_unlock(src_rq, src_rf);
+	rq_unlock(grq, &grf);
 
 	// lock dist rq
 	rq_lock(dist_rq, &rf);
@@ -1082,36 +1103,9 @@ static void pull_from(struct rq *dist_rq,
 
 	// unlock dist rq
 	rq_unlock(dist_rq, &rf);
+	local_irq_restore(grf.flags);
 
-	local_irq_restore(src_rf->flags);
-}
-
-static int move_task(struct rq *dist_rq, struct rq *src_rq,
-			struct rq_flags *src_rf)
-{
-	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
-	struct task_struct *p;
-	struct tt_node *ttn = src_cfs_rq->head;
-
-	while (ttn) {
-		p = task_of(se_of(ttn));
-		if (can_migrate_task(p, dist_rq, src_rq)) {
-			pull_from(dist_rq, src_rq, src_rf, p);
-			return 1;
-		}
-
-		ttn = ttn->next;
-	}
-
-	/*
-	 * Here we know we have not migrated any task,
-	 * thus, we need to unlock and return 0
-	 * Note: the pull_from does the unlocking for us.
-	 */
-	rq_unlock(src_rq, src_rf);
-	local_irq_restore(src_rf->flags);
-
-	return 0;
+	return 1;
 }
 
 static inline int on_null_domain(struct rq *rq)
@@ -1124,11 +1118,7 @@ static inline int on_null_domain(struct rq *rq)
 static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 {
 	int this_cpu = this_rq->cpu;
-	struct rq *src_rq;
-	int src_cpu = -1, cpu;
 	int pulled_task = 0;
-	unsigned int max = 0;
-	struct rq_flags src_rf;
 
 	/*
 	 * We must set idle_stamp _before_ calling idle_balance(), such that we
@@ -1146,44 +1136,8 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 	raw_spin_unlock(&this_rq->__lock);
 
 	update_blocked_averages(this_cpu);
+	pulled_task = pull_from_grq(this_rq);
 
-	for_each_online_cpu(cpu) {
-		/*
-		 * Stop searching for tasks to pull if there are
-		 * now runnable tasks on this rq.
-		 */
-		if (this_rq->nr_running > 0)
-			goto out;
-
-		if (cpu == this_cpu)
-			continue;
-
-		src_rq = cpu_rq(cpu);
-
-		if (src_rq->nr_running < 2)
-			continue;
-
-		if (src_rq->nr_running > max) {
-			max = src_rq->nr_running;
-			src_cpu = cpu;
-		}
-	}
-
-	if (src_cpu != -1) {
-		src_rq = cpu_rq(src_cpu);
-
-		rq_lock_irqsave(src_rq, &src_rf);
-		update_rq_clock(src_rq);
-
-		if (src_rq->nr_running < 2) {
-			rq_unlock(src_rq, &src_rf);
-			local_irq_restore(src_rf.flags);
-		} else {
-			pulled_task = move_task(this_rq, src_rq, &src_rf);
-		}
-	}
-
-out:
 	raw_spin_lock(&this_rq->__lock);
 
 	/*
@@ -1208,58 +1162,75 @@ out:
 	return pulled_task;
 }
 
+static void push_to_grq_unlocked(struct rq *rq)
+{
+	struct cfs_rq *cfs_rq = &rq->cfs;
+	struct sched_entity *se;
+	struct tt_node *ttn, *next, *port = NULL;
+	struct task_struct *p;
+	struct rq_flags rf, grf;
+
+	if (rq == grq)
+		return;
+
+	if (!cfs_rq->head)
+		return;
+
+	rq_lock_irqsave(rq, &rf);
+	update_rq_clock(rq);
+
+	/// dequeue tasks from this rq
+	ttn = cfs_rq->head;
+	while (ttn) {
+		next = ttn->next;
+
+		se = se_of(ttn);
+		p = task_of(se);
+
+		if (!task_can_move_to_grq(p))
+			goto next;
+
+		// deactivate
+		deactivate_task(rq, p, DEQUEUE_NOCLOCK);
+		// enqueue to port
+		__enqueue_entity_port(&port, se);
+
+		set_task_cpu(p, cpu_of(grq));
+
+next:
+		ttn = next;
+	}
+
+	rq_unlock_irqrestore(rq, &rf);
+
+	if (!port)
+		return;
+
+	LOCK_GRQ(grf);
+
+	/// enqueue tasks to grq
+	while (port) {
+		se = se_of(port);
+		p = task_of(se);
+		// enqueue to port
+		__dequeue_entity_port(&port, se);
+
+		// activate
+		activate_task(grq, p, ENQUEUE_NOCLOCK);
+	}
+
+	UNLOCK_GRQ(grf);
+}
+
 void trigger_load_balance(struct rq *this_rq)
 {
-	int this_cpu = cpu_of(this_rq);
-	int cpu;
-	unsigned int max, min;
-	struct rq *max_rq, *min_rq, *c_rq;
-	struct rq_flags src_rf;
-
-	if (this_cpu != 0)
-		goto out;
-
-	max = min = this_rq->nr_running;
-	max_rq = min_rq = this_rq;
-
-	for_each_online_cpu(cpu) {
-		c_rq = cpu_rq(cpu);
-
-		/*
-		 * Don't need to rebalance while attached to NULL domain or
-		 * runqueue CPU is not active
-		 */
-		if (unlikely(on_null_domain(c_rq) || !cpu_active(cpu)))
-			continue;
-
-		if (c_rq->nr_running < min) {
-			min = c_rq->nr_running;
-			min_rq = c_rq;
-		}
-
-		if (c_rq->nr_running > max) {
-			max = c_rq->nr_running;
-			max_rq = c_rq;
-		}
-	}
-
-	if (min_rq == max_rq || max - min < 2)
-		goto out;
-
-	rq_lock_irqsave(max_rq, &src_rf);
-	update_rq_clock(max_rq);
-
-	if (max_rq->nr_running < 2) {
-		rq_unlock(max_rq, &src_rf);
-		local_irq_restore(src_rf.flags);
-		goto out;
-	}
-
-	move_task(min_rq, max_rq, &src_rf);
-
-out:
 	if (unlikely(on_null_domain(this_rq) || !cpu_active(cpu_of(this_rq))))
 		return;
+
+	if (this_rq->idle_balance)
+		pull_from_grq(this_rq);
+	else
+		push_to_grq_unlocked(this_rq);
 
 #ifdef CONFIG_TT_ACCOUNTING_STATS
 	if (time_after_eq(jiffies, this_rq->next_balance)) {
