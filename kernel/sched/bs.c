@@ -1060,11 +1060,17 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 			return new_cpu;
 		}
 
+		if (IS_GRQ_BL_ENABLED)
+			return new_cpu;
+
 		if (cpu_rq(cpu)->nr_running < min) {
 			new_cpu = cpu;
 			min = cpu_rq(cpu)->nr_running;
 		}
 	}
+
+	if (IS_GRQ_BL_ENABLED)
+		return smp_processor_id();
 
 	if (min == min_prev)
 		return prev_cpu;
