@@ -4508,8 +4508,9 @@ void wake_up_new_task(struct task_struct *p)
 {
 	struct rq_flags rf;
 	struct rq *rq;
+#ifdef CONFIG_TT_SCHED
 	int target_cpu = 0;
-
+#endif
 	raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
 	WRITE_ONCE(p->__state, TASK_RUNNING);
 #ifdef CONFIG_SMP
@@ -4523,8 +4524,12 @@ void wake_up_new_task(struct task_struct *p)
 	 */
 	p->recent_used_cpu = task_cpu(p);
 	rseq_migrate(p);
+#ifdef CONFIG_TT_SCHED
 	target_cpu = select_task_rq(p, task_cpu(p), WF_FORK);
 	__set_task_cpu(p, target_cpu);
+#else
+	__set_task_cpu(p, select_task_rq(p, task_cpu(p), WF_FORK));
+#endif
 #endif
 	rq = __task_rq_lock(p, &rf);
 

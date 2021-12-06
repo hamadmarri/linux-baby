@@ -1004,7 +1004,9 @@ struct rq {
 	struct task_struct	*idle;
 	struct task_struct	*stop;
 	unsigned long		next_balance;
+#ifdef CONFIG_TT_SCHED
 	unsigned long		lat_decay;
+#endif
 	struct mm_struct	*prev_mm;
 
 	unsigned int		clock_update_flags;
@@ -1809,7 +1811,9 @@ DECLARE_PER_CPU(struct sched_domain_shared __rcu *, sd_llc_shared);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_numa);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_packing);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
+#ifdef CONFIG_TT_SCHED
 DECLARE_PER_CPU(int, nr_lat_sensitive);
+#endif
 extern struct static_key_false sched_asym_cpucapacity;
 
 struct sched_group_capacity {
@@ -2280,7 +2284,10 @@ extern struct task_struct *pick_next_task_idle(struct rq *rq);
 extern void update_group_capacity(struct sched_domain *sd, int cpu);
 
 extern void trigger_load_balance(struct rq *rq);
+
+#ifdef CONFIG_TT_SCHED
 extern int idle_pull_global_candidate(struct rq *dist_rq);
+#endif
 
 extern void set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask, u32 flags);
 
@@ -2435,7 +2442,9 @@ extern void deactivate_task(struct rq *rq, struct task_struct *p, int flags);
 
 extern void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags);
 
+#ifdef CONFIG_TT_SCHED
 extern inline void dec_nr_lat_sensitive(unsigned int cpu);
+#endif
 
 extern const_debug unsigned int sysctl_sched_nr_migrate;
 extern const_debug unsigned int sysctl_sched_migration_cost;
