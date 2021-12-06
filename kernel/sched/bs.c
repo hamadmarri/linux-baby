@@ -285,6 +285,38 @@ entity_before(struct tt_node *a, struct tt_node *b)
 	return (s64)(HRRN_PERCENT(a, now) - HRRN_PERCENT(b, now)) < 0;
 }
 
+static void __enqueue_entity_port(struct tt_node **port, struct sched_entity *se)
+{
+	struct tt_node *ttn = &se->tt_node;
+
+	ttn->next = ttn->prev = NULL;
+
+	// if empty
+	if (!(*port)) {
+		(*port)		= ttn;
+	}
+	else {
+		ttn->next	= (*port);
+		(*port)->prev	= ttn;
+		(*port)		= ttn;
+	}
+}
+
+static void __dequeue_entity_port(struct tt_node **port, struct sched_entity *se)
+{
+	struct tt_node *ttn = &se->tt_node;
+
+	// if only one se in rq
+	if ((*port)->next == NULL) {
+		(*port) = NULL;
+	}
+	// if it is the head
+	else if (ttn == (*port)) {
+		(*port)		= (*port)->next;
+		(*port)->prev	= NULL; // ??
+	}
+}
+
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct tt_node *ttn = &se->tt_node;
@@ -710,9 +742,6 @@ again:
 
 	p = task_of(se);
 
-	if (prev)
-		YIELD_UNMARK(&prev->se.tt_node);
-
 done: __maybe_unused;
 #ifdef CONFIG_SMP
 	/*
@@ -805,6 +834,7 @@ static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
 {
 	struct sched_entity *se = &prev->se;
 
+	YIELD_UNMARK(&prev->se.tt_node);
 	put_prev_entity(cfs_rq_of(se), se);
 }
 
@@ -1280,6 +1310,90 @@ fail_unlock:
 	rq_unlock(src_rq, &src_rf);
 	local_irq_restore(src_rf.flags);
 	return 0;
+}
+
+static int
+can_migrate_task_grq(struct tt_node *ttn, struct rq *dst_rq)
+{
+	struct task_struct *p = task_of(se_of(ttn));
+
+	if (kthread_is_per_cpu(p))
+		return 0;
+
+	if (!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr))
+		return 0;
+
+	if (task_running(grq, p))
+		return 0;
+
+	return 1;
+}
+
+static struct sched_entity *
+pick_next_entity_from_grq(struct rq *dist_rq)
+{
+	struct tt_node *ttn = grq->cfs.head;
+	struct tt_node *next;
+
+	while (ttn && !can_migrate_task_grq(ttn, dist_rq))
+		ttn = ttn->next;
+
+	if (!ttn)
+		return NULL;
+
+	next = ttn->next;
+	while (next) {
+		if (can_migrate_task_grq(next, dist_rq) && entity_before(next, ttn))
+			ttn = next;
+
+		next = next->next;
+	}
+
+	return se_of(ttn);
+}
+
+static int pull_from_grq(struct rq *dist_rq)
+{
+	struct rq_flags rf;
+	struct rq_flags grf;
+	struct sched_entity *se;
+	struct task_struct *p = NULL;
+
+	if (dist_rq == grq)
+		return 0;
+
+	rq_lock_irqsave(grq, &grf);
+	update_rq_clock(grq);
+
+	se = pick_next_entity_from_grq(dist_rq);
+
+	if (!se) {
+		rq_unlock(grq, &grf);
+		local_irq_restore(grf.flags);
+		return 0;
+	}
+
+	p = task_of(se);
+
+	// detach task
+	deactivate_task(grq, p, DEQUEUE_NOCLOCK);
+	set_task_cpu(p, cpu_of(dist_rq));
+
+	// unlock src rq
+	rq_unlock(grq, &grf);
+
+	// lock dist rq
+	rq_lock(dist_rq, &rf);
+	update_rq_clock(dist_rq);
+
+	activate_task(dist_rq, p, ENQUEUE_NOCLOCK);
+	check_preempt_curr(dist_rq, p, 0);
+
+	// unlock dist rq
+	rq_unlock(dist_rq, &rf);
+	local_irq_restore(grf.flags);
+
+	return 1;
 }
 
 static inline int on_null_domain(struct rq *rq)
