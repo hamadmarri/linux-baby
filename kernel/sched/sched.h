@@ -91,6 +91,11 @@
 #define TT_NO_TYPE	2
 #define TT_CPU_BOUND	3
 #define TT_BATCH	4
+
+#define TT_BL_NORM	0
+#define TT_BL_CAND	1
+#define TT_BL_GRQ	2
+extern struct rq *grq;
 #endif
 
 struct rq;

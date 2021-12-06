@@ -44,6 +44,10 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(sched_update_nr_running_tp);
 
 DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 
+#ifdef CONFIG_TT_SCHED
+struct rq *grq = NULL;
+#endif
+
 #ifdef CONFIG_SCHED_DEBUG
 /*
  * Debugging: various feature bits
@@ -9515,6 +9519,12 @@ void __init sched_init(void)
 		rq->lat_decay = jiffies;
 		rq->push_cpu = 0;
 		rq->cpu = i;
+#ifdef CONFIG_TT_SCHED
+		if (!grq) {
+			grq = rq;
+			printk(KERN_INFO "Global runqueue is on cpu %d", cpu_of(grq));
+		}
+#endif
 		rq->online = 0;
 		rq->idle_stamp = 0;
 		rq->avg_idle = 2*sysctl_sched_migration_cost;

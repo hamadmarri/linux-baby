@@ -1784,6 +1784,15 @@ static struct ctl_table kern_table[] = {
 	},
 #ifdef CONFIG_TT_SCHED
 	{
+		.procname	= "sched_tt_balancer_opt",
+		.data		= &tt_balancer_opt,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero_ul,
+		.extra2		= &two,
+	},
+	{
 		.procname	= "sched_tt_max_lifetime",
 		.data		= &tt_max_lifetime,
 		.maxlen		= sizeof(unsigned int),
