@@ -211,12 +211,14 @@ static inline int task_has_dl_policy(struct task_struct *p)
 	return dl_policy(p->policy);
 }
 
+#ifdef CONFIG_TT_SCHED
 static inline int task_is_lat_sensitive(struct task_struct *p)
 {
 	unsigned int tt = p->se.tt_node.task_type;
 
 	return (tt == TT_INTERACTIVE);
 }
+#endif
 
 #define cap_scale(v, s) ((v)*(s) >> SCHED_CAPACITY_SHIFT)
 
