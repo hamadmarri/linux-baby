@@ -53,6 +53,11 @@ struct ctl_dir;
 #define SYSCTL_MAXOLDUID		((void *)&sysctl_vals[10])
 #define SYSCTL_NEG_ONE			((void *)&sysctl_vals[11])
 
+#ifdef CONFIG_TT_SCHED
+#define SYSCTL_NEG_TWENTY		((void *)&sysctl_vals[12])
+#define SYSCTL_NINETEEN			((void *)&sysctl_vals[13])
+#endif
+
 extern const int sysctl_vals[];
 
 #define SYSCTL_LONG_ZERO	((void *)&sysctl_long_vals[0])

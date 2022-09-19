@@ -105,6 +105,64 @@ unsigned int sysctl_sched_idle_min_granularity			= 750000ULL;
  */
 static unsigned int sched_nr_latency = 8;
 
+#ifdef CONFIG_TT_SCHED
+unsigned int __read_mostly tt_balancer_opt	= 0;
+unsigned int __read_mostly tt_max_lifetime	= 22000; // in ms
+int __read_mostly tt_rt_prio			= -20;
+int __read_mostly tt_interactive_prio		= -10;
+int __read_mostly tt_cpu_bound_prio		= -15;
+int __read_mostly tt_batch_prio			=  19;
+
+#define MAX_HRRN				0xFFFFFFFFFFFFFFFULL
+#define YIELD_MARK(ttn)				((ttn)->vruntime |= 0x8000000000000000ULL)
+#define YIELD_UNMARK(ttn)			((ttn)->vruntime &= 0x7FFFFFFFFFFFFFFFULL)
+
+struct global_candidate {
+	struct rq *rq;
+	struct tt_node *candidate;
+	u64 hrrn;
+
+	// for update
+	raw_spinlock_t lock;
+};
+
+struct global_candidate global_candidate = {0, 0, MAX_HRRN};
+
+#define LOCK_GRQ(grf) ({ \
+	rq_lock_irqsave(grq, &(grf)); \
+	update_rq_clock(grq); \
+})
+
+#define UNLOCK_GRQ(grf) ({ \
+	rq_unlock(grq, &(grf)); \
+	local_irq_restore((grf).flags); \
+})
+
+#define INTERACTIVE_HRRN	2U
+#define RT_WAIT_DELTA		800000U
+#define RT_BURST_DELTA		2000000U
+#define RT_BURST_MAX		4000000U
+
+#define HZ_PERIOD (1000000000 / HZ)
+#define RACE_TIME 40000000
+#define FACTOR (RACE_TIME / HZ_PERIOD)
+
+#define IS_REALTIME(ttn)	((ttn)->task_type == TT_REALTIME)
+#define IS_INTERACTIVE(ttn)	((ttn)->task_type == TT_INTERACTIVE)
+#define IS_NO_TYPE(ttn)		((ttn)->task_type == TT_NO_TYPE)
+#define IS_CPU_BOUND(ttn)	((ttn)->task_type == TT_CPU_BOUND)
+#define IS_BATCH(ttn)		((ttn)->task_type == TT_BATCH)
+
+#define GEQ(a, b) ((s64)((a) - (b)) >= 0)	// is a >= b
+#define LEQ(a, b) ((s64)((a) - (b)) <= 0)	// is a <= b
+#define LES(a, b) ((s64)((a) - (b)) < 0)	// is a <  b
+#define EQ_D(a, b, d) (LEQ(a, b + d) && GEQ(a, b - d))
+
+#define HRRN_PERCENT(ttn, now) \
+	(((ttn)->vruntime * 1000ULL) / (((now) - (ttn)->start_time) | 1))
+
+#endif
+
 /*
  * After fork, child runs first. If set to 0 (default) then
  * parent will (try to) run first.
@@ -124,6 +182,13 @@ unsigned int sysctl_sched_wakeup_granularity			= 1000000UL;
 static unsigned int normalized_sysctl_sched_wakeup_granularity	= 1000000UL;
 
 const_debug unsigned int sysctl_sched_migration_cost	= 500000UL;
+
+#ifdef CONFIG_TT_SCHED
+static inline struct sched_entity *se_of(struct tt_node *ttn)
+{
+	return container_of(ttn, struct sched_entity, tt_node);
+}
+#endif
 
 int sched_thermal_decay_shift;
 static int __init setup_sched_thermal_decay_shift(char *str)
@@ -579,11 +644,24 @@ static inline u64 min_vruntime(u64 min_vruntime, u64 vruntime)
 	return min_vruntime;
 }
 
+#ifdef CONFIG_TT_SCHED
+/**
+ * Should `a` preempts `b`?
+ */
+static inline bool
+entity_before(struct tt_node *a, struct tt_node *b)
+{
+	u64 now = sched_clock();
+
+	return (s64)(HRRN_PERCENT(a, now) - HRRN_PERCENT(b, now)) < 0;
+}
+#else
 static inline bool entity_before(struct sched_entity *a,
 				struct sched_entity *b)
 {
 	return (s64)(a->vruntime - b->vruntime) < 0;
 }
+#endif
 
 #define __node_2_se(node) \
 	rb_entry((node), struct sched_entity, run_node)
@@ -618,12 +696,73 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 
 static inline bool __entity_less(struct rb_node *a, const struct rb_node *b)
 {
+#ifdef CONFIG_TT_SCHED
+	return entity_before(&(__node_2_se(a)->tt_node), &(__node_2_se(b)->tt_node));
+#else
 	return entity_before(__node_2_se(a), __node_2_se(b));
+#endif
 }
 
+#ifdef CONFIG_TT_SCHED
 /*
  * Enqueue an entity into the rb-tree:
  */
+static void __enqueue_entity_cfs(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	rb_add_cached(&se->run_node, &cfs_rq->tasks_timeline, __entity_less);
+}
+
+static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	struct tt_node *ttn = &se->tt_node;
+
+	ttn->next = ttn->prev = NULL;
+
+	// if empty
+	if (!cfs_rq->head) {
+		cfs_rq->head	= ttn;
+	}
+	else {
+		ttn->next	     = cfs_rq->head;
+		cfs_rq->head->prev   = ttn;
+		cfs_rq->head         = ttn;
+	}
+
+	__enqueue_entity_cfs(cfs_rq, se);
+}
+
+static void __dequeue_entity_cfs(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	rb_erase_cached(&se->run_node, &cfs_rq->tasks_timeline);
+}
+
+static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	struct tt_node *ttn = &se->tt_node;
+	struct tt_node *prev, *next;
+
+	// if only one se in rq
+	if (cfs_rq->head->next == NULL) {
+		cfs_rq->head = NULL;
+	}
+	// if it is the head
+	else if (ttn == cfs_rq->head) {
+		cfs_rq->head	   = cfs_rq->head->next;
+		cfs_rq->head->prev = NULL;
+	}
+	// if in the middle
+	else {
+		prev = ttn->prev;
+		next = ttn->next;
+
+		prev->next = next;
+		if (next)
+			next->prev = prev;
+	}
+
+	__dequeue_entity_cfs(cfs_rq, se);
+}
+#else
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	rb_add_cached(&se->run_node, &cfs_rq->tasks_timeline, __entity_less);
@@ -633,7 +772,58 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	rb_erase_cached(&se->run_node, &cfs_rq->tasks_timeline);
 }
+#endif
 
+#ifdef CONFIG_TT_SCHED
+struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
+{
+	struct tt_node *ttn = cfs_rq->head;
+	struct tt_node *next;
+
+	if (!ttn)
+		return NULL;
+
+	next = ttn->next;
+	while (next) {
+		if (entity_before(next, ttn))
+			ttn = next;
+
+		next = next->next;
+	}
+
+	return se_of(ttn);
+}
+
+static struct sched_entity *__pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	struct tt_node *ttn = cfs_rq->head;
+	struct tt_node *se_ttn;
+	struct tt_node *next;
+
+	if (!ttn)
+		return NULL;
+
+	if (!se)
+		return __pick_first_entity(cfs_rq);
+
+	se_ttn	= &se->tt_node;
+	next	= ttn->next;
+
+	while (next) {
+		if (next != se_ttn) {
+			if (ttn == se_ttn || entity_before(next, ttn))
+				ttn = next;
+		}
+
+		next = next->next;
+	}
+
+	if (ttn == se_ttn)
+		return NULL;
+
+	return se_of(ttn);
+}
+#else
 struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
 {
 	struct rb_node *left = rb_first_cached(&cfs_rq->tasks_timeline);
@@ -653,6 +843,7 @@ static struct sched_entity *__pick_next_entity(struct sched_entity *se)
 
 	return __node_2_se(next);
 }
+#endif
 
 #ifdef CONFIG_SCHED_DEBUG
 struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
@@ -879,13 +1070,199 @@ static void update_tg_load_avg(struct cfs_rq *cfs_rq)
 }
 #endif /* CONFIG_SMP */
 
+#ifdef CONFIG_TT_SCHED
+static inline bool is_interactive(struct tt_node *ttn, u64 now, u64 _hrrn)
+{
+	u64 wait;
+
+	if (LES(_hrrn, (u64) INTERACTIVE_HRRN))
+		return false;
+
+	wait = now - se_of(ttn)->exec_start;
+	if (wait && EQ_D(wait, ttn->prev_wait_time, RT_WAIT_DELTA))
+		return false;
+
+	return true;
+}
+
+static inline bool is_realtime(struct tt_node *ttn, u64 now, int flags)
+{
+	u64 life_time, wait;
+
+	// it has slept at least once
+	if (!ttn->wait_time)
+		return false;
+
+	// life time >= 0.5s
+	life_time = now - task_of(se_of(ttn))->start_time;
+	if (LES(life_time, 500000000ULL))
+		return false;
+
+	// don't check wait time for migrated tasks
+	if (!(flags & ENQUEUE_MIGRATED)) {
+		/* it has relatively equal sleeping/waiting times
+		 * (ex. it sleeps for ~10ms and run repeatedly)
+		 */
+		wait = now - se_of(ttn)->exec_start;
+		if (wait && !EQ_D(wait, ttn->prev_wait_time, RT_WAIT_DELTA))
+			return false;
+	}
+
+	// bursts before sleep are relatively equal (delta 2ms)
+	if (!EQ_D(ttn->burst, ttn->prev_burst, RT_BURST_DELTA))
+		return false;
+
+	// burst before sleep is <= 4ms
+	if (LEQ(ttn->burst, RT_BURST_MAX) &&
+	    LEQ(ttn->curr_burst, RT_BURST_MAX))
+		return true;
+
+	return false;
+}
+
+static inline bool is_cpu_bound(struct tt_node *ttn)
+{
+	u64 _hrrn_percent;
+
+	_hrrn_percent = ttn->vruntime * 100ULL;
+	_hrrn_percent /= ttn->wait_time + ttn->vruntime;
+
+	// HRRN >= 90%
+	return (GEQ(_hrrn_percent, 90ULL));
+}
+
+static inline bool is_batch(struct tt_node *ttn, u64 _hrrn)
+{
+	// HRRN > 50%
+	return (LES(_hrrn, 2ULL));
+}
+
+static void detect_type(struct tt_node *ttn, u64 now, int flags)
+{
+	unsigned int new_type = TT_NO_TYPE;
+	unsigned int old_type = ttn->task_type;
+	u64 _hrrn;
+	unsigned int cpu;
+
+	if (ttn->vruntime == 1) {
+		ttn->task_type = TT_NO_TYPE;
+		return;
+	}
+
+	_hrrn = (ttn->wait_time + ttn->vruntime) / ttn->vruntime;
+
+	if (is_realtime(ttn, now, flags))
+		new_type = TT_REALTIME;
+	else if (is_interactive(ttn, now, _hrrn))
+		new_type = TT_INTERACTIVE;
+	else if (is_cpu_bound(ttn))
+		new_type = TT_CPU_BOUND;
+	else if (is_batch(ttn, _hrrn))
+		new_type = TT_BATCH;
+
+	if (new_type == TT_REALTIME) {
+		ttn->rt_sticky = 4;
+	} else if (IS_REALTIME(ttn) && ttn->rt_sticky) {
+		ttn->rt_sticky--;
+		return;
+	}
+
+	if (new_type != old_type) {
+		cpu = task_cpu(task_of(se_of(ttn)));
+
+		/*
+		 * Recall:
+		 * TT_REALTIME		0
+		 * TT_INTERACTIVE	1
+		 * TT_NO_TYPE		2
+		 * TT_CPU_BOUND		3
+		 * TT_BATCH		4
+		 */
+		if (new_type <= TT_INTERACTIVE && old_type > TT_INTERACTIVE)
+			per_cpu(nr_lat_sensitive, cpu)++;
+		else if (old_type <= TT_INTERACTIVE && new_type > TT_INTERACTIVE)
+			dec_nr_lat_sensitive(cpu);
+	}
+
+	ttn->task_type = new_type;
+}
+
+static void normalize_lifetime(u64 now, struct tt_node *ttn)
+{
+	u64 max_life_ns, life_time, old_hrrn_x;
+	s64 diff;
+
+	/*
+	 * left shift 20 bits is approximately = * 1000000
+	 * we don't need the precision of life time
+	 * Ex. for 22s, with left shift (20bits) == 23.06s
+	 */
+	max_life_ns	= ((u64) tt_max_lifetime) << 20;
+	life_time	= now - ttn->start_time;
+	diff		= life_time - max_life_ns;
+
+	if (likely(diff < 0))
+		return;
+
+	// unmark YIELD. No need to check or remark since
+	// this normalize action doesn't happen very often
+	YIELD_UNMARK(ttn);
+
+	// multiply life_time by 1024 for more precision
+	old_hrrn_x = (life_time << 7) / ((ttn->vruntime >> 3) | 1);
+
+	// reset life to half max_life (i.e ~15s)
+	ttn->start_time = now - (max_life_ns >> 1);
+
+	// avoid division by zero
+	if (old_hrrn_x == 0) old_hrrn_x = 1;
+
+	// reset vruntime based on old hrrn ratio
+	ttn->vruntime = ((max_life_ns << 9) / old_hrrn_x) | 1;
+}
+
+static u64 convert_to_vruntime(u64 delta, struct sched_entity *se)
+{
+	struct task_struct *p = task_of(se);
+	s64 prio_diff;
+	int prio = PRIO_TO_NICE(p->prio);
+
+	if (IS_REALTIME(&se->tt_node))
+		prio = tt_rt_prio;
+	else if (IS_INTERACTIVE(&se->tt_node))
+		prio = tt_interactive_prio;
+	else if (IS_CPU_BOUND(&se->tt_node))
+		prio = tt_cpu_bound_prio;
+	else if (IS_BATCH(&se->tt_node))
+		prio = tt_batch_prio;
+
+	if (prio == 0)
+		return delta;
+
+	prio_diff = prio * 1000000;
+	prio_diff /= FACTOR;
+
+	if ((s64)(delta + prio_diff) < 0)
+		return 1;
+
+	return delta + prio_diff;
+}
+
+static void update_candidate(struct cfs_rq *cfs_rq);
+#endif
+
 /*
  * Update the current task's runtime statistics.
  */
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
+#ifdef CONFIG_TT_SCHED
+	struct tt_node *ttn = &curr->tt_node;
+	u64 now = sched_clock();
+#else
 	u64 now = rq_clock_task(rq_of(cfs_rq));
+#endif
 	u64 delta_exec;
 
 	if (unlikely(!curr))
@@ -910,6 +1287,18 @@ static void update_curr(struct cfs_rq *cfs_rq)
 
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
 	update_min_vruntime(cfs_rq);
+
+#ifdef CONFIG_TT_SCHED
+	ttn->curr_burst	+= delta_exec;
+	ttn->vruntime	+= convert_to_vruntime(delta_exec, curr);
+	detect_type(ttn, now, 0);
+	normalize_lifetime(now, &curr->tt_node);
+
+	if (IS_CAND_BL_ENABLED) {
+		cfs_rq->local_cand_hrrn = HRRN_PERCENT(&curr->tt_node, now);
+		update_candidate(cfs_rq);
+	}
+#endif
 
 	if (entity_is_task(curr)) {
 		struct task_struct *curtask = task_of(curr);
@@ -1045,7 +1434,11 @@ update_stats_curr_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	/*
 	 * We are starting a new run period:
 	 */
+#ifdef CONFIG_TT_SCHED
+	se->exec_start = sched_clock();
+#else
 	se->exec_start = rq_clock_task(rq_of(cfs_rq));
+#endif
 }
 
 /**************************************************
@@ -4413,6 +4806,22 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
 	bool curr = cfs_rq->curr == se;
 
+#ifdef CONFIG_TT_SCHED
+	struct tt_node *ttn = &se->tt_node;
+	bool wakeup = (flags & ENQUEUE_WAKEUP);
+	u64 now = sched_clock();
+	u64 wait;
+
+	if (wakeup) {
+		wait = now - se->exec_start;
+		ttn->wait_time += wait;
+		detect_type(ttn, now, flags);
+
+		ttn->prev_wait_time = wait;
+	} else {
+		detect_type(ttn, now, flags);
+	}
+#endif
 	/*
 	 * If we're the current task, we must renormalise before calling
 	 * update_curr().
@@ -4508,9 +4917,135 @@ static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq);
 
+#ifdef CONFIG_TT_SCHED
+static inline int clear_this_candidate(struct sched_entity *se)
+{
+	struct tt_node *ttn = &se->tt_node;
+	struct tt_node *curr_can = READ_ONCE(global_candidate.candidate);
+
+	if (ttn != curr_can)
+		return 0;
+
+	WRITE_ONCE(global_candidate.candidate, NULL);
+	WRITE_ONCE(global_candidate.rq, NULL);
+	WRITE_ONCE(global_candidate.hrrn, MAX_HRRN);
+
+	return 1;
+}
+
+static inline void clear_rq_candidate(struct cfs_rq *cfs_rq)
+{
+	struct rq *rq = READ_ONCE(global_candidate.rq);
+
+	if (rq != rq_of(cfs_rq))
+		return;
+
+	WRITE_ONCE(global_candidate.candidate, NULL);
+	WRITE_ONCE(global_candidate.rq, NULL);
+	WRITE_ONCE(global_candidate.hrrn, MAX_HRRN);
+}
+
+static inline bool
+can_be_candidate(struct tt_node *ttn, int this_cpu)
+{
+	struct task_struct *p = task_of(se_of(ttn));
+
+	if (kthread_is_per_cpu(p))
+		return 0;
+
+	/*
+	 * only realtime and interactive can
+	 * be candidates
+	 */
+	if (ttn->task_type > TT_INTERACTIVE)
+		return 0;
+
+	// just migrated
+	if (p->se.avg.last_update_time == 0)
+		return 0;
+
+	if (task_running(cpu_rq(this_cpu), p))
+		return 0;
+
+	// some tasks are pinned to this cpu
+	if (p->nr_cpus_allowed <= 1)
+		return 0;
+
+	if (is_migration_disabled(p))
+		return 0;
+
+	return 1;
+}
+
+static void __update_candidate(struct cfs_rq *cfs_rq, struct tt_node *ttn)
+{
+	unsigned long flags;
+	u64 hrrn, curr_can_hrrn;
+
+	curr_can_hrrn = READ_ONCE(global_candidate.hrrn);
+	hrrn = HRRN_PERCENT(ttn, sched_clock());
+
+	if ((s64)(hrrn - curr_can_hrrn) < 0) {
+		raw_spin_lock_irqsave(&global_candidate.lock, flags);
+		global_candidate.rq = rq_of(cfs_rq);
+		global_candidate.candidate = ttn;
+		global_candidate.hrrn = hrrn;
+		raw_spin_unlock_irqrestore(&global_candidate.lock, flags);
+	}
+}
+
+static void update_candidate(struct cfs_rq *cfs_rq)
+{
+	struct tt_node *ttn = cfs_rq->head;
+	struct tt_node *next;
+	int this_cpu = cpu_of(rq_of(cfs_rq));
+
+	while (ttn && !can_be_candidate(ttn, this_cpu))
+		ttn = ttn->next;
+
+	if (!ttn) {
+		clear_rq_candidate(cfs_rq);
+		return;
+	}
+
+	next = ttn->next;
+	while (next) {
+		if (can_be_candidate(next, this_cpu) && entity_before(next, ttn))
+			ttn = next;
+
+		next = next->next;
+	}
+
+	__update_candidate(cfs_rq, ttn);
+}
+#endif
+
 static void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
+#ifdef CONFIG_TT_SCHED
+	struct tt_node *ttn = &se->tt_node;
+	bool sleep = (flags & DEQUEUE_SLEEP);
+	u64 avg_wait;
+
+	if (sleep) {
+		ttn->prev_burst = ttn->burst;
+		ttn->burst = ttn->curr_burst;
+		ttn->curr_burst = 0;
+
+		if (IS_CPU_BOUND(ttn))
+			ttn->task_type = TT_BATCH;
+		else if (IS_REALTIME(ttn)) {
+			avg_wait = ttn->prev_wait_time;
+			avg_wait += ttn->wait_time;
+			avg_wait /= 2ULL;
+
+			if (LEQ(avg_wait, HZ_PERIOD))
+				per_cpu(nr_lat_sensitive, cpu_of(rq_of(cfs_rq)))++;
+		}
+	}
+#endif
+
 	/*
 	 * Update run-time statistics of the 'current'.
 	 */
@@ -4533,6 +5068,12 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	if (se != cfs_rq->curr)
 		__dequeue_entity(cfs_rq, se);
+
+#ifdef CONFIG_TT_SCHED
+	if (IS_CAND_BL_ENABLED && clear_this_candidate(se))
+		update_candidate(cfs_rq);
+#endif
+
 	se->on_rq = 0;
 	account_entity_dequeue(cfs_rq, se);
 
@@ -4576,7 +5117,14 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	ideal_runtime = sched_slice(cfs_rq, curr);
 	delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
 	if (delta_exec > ideal_runtime) {
+#ifdef CONFIG_TT_SCHED
+		if (IS_CAND_BL_ENABLED) {
+			cfs_rq->local_cand_hrrn = 0;
+			clear_rq_candidate(cfs_rq);
+		}
+#endif
 		resched_curr(rq_of(cfs_rq));
+
 		/*
 		 * The current task ran long enough, ensure it doesn't get
 		 * re-elected due to buddy favours.
@@ -4590,22 +5138,55 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	 * narrow margin doesn't have to wait for a full slice.
 	 * This also mitigates buddy induced latencies under load.
 	 */
+#ifdef CONFIG_TT_SCHED
+	if (delta_exec < sysctl_sched_min_granularity) {
+		if (IS_CAND_BL_ENABLED)
+			clear_this_candidate(curr);
+		return;
+	}
+#else
 	if (delta_exec < sysctl_sched_min_granularity)
 		return;
+#endif
 
 	se = __pick_first_entity(cfs_rq);
 	delta = curr->vruntime - se->vruntime;
 
+#ifdef CONFIG_TT_SCHED
+	if (entity_before(&curr->tt_node, &se->tt_node)) {
+		if (IS_CAND_BL_ENABLED)
+			clear_this_candidate(curr);
+		return;
+	}
+#else
 	if (delta < 0)
 		return;
+#endif
 
+#ifdef CONFIG_TT_SCHED
+	if (delta > ideal_runtime) {
+		if (IS_CAND_BL_ENABLED) {
+			clear_this_candidate(se);
+			cfs_rq->local_cand_hrrn = HRRN_PERCENT(&se->tt_node, sched_clock());
+		}
+
+		resched_curr(rq_of(cfs_rq));
+	} else if (IS_CAND_BL_ENABLED) {
+		clear_this_candidate(curr);
+	}
+#else
 	if (delta > ideal_runtime)
 		resched_curr(rq_of(cfs_rq));
+#endif
 }
 
 static void
 set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+#ifdef CONFIG_TT_SCHED
+	if (IS_CAND_BL_ENABLED)
+		clear_this_candidate(se);
+#endif
 	clear_buddies(cfs_rq, se);
 
 	/* 'current' is not kept within the tree. */
@@ -4619,6 +5200,13 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		__dequeue_entity(cfs_rq, se);
 		update_load_avg(cfs_rq, se, UPDATE_TG);
 	}
+
+#ifdef CONFIG_TT_SCHED
+	if (IS_CAND_BL_ENABLED)	{
+		update_candidate(cfs_rq);
+		cfs_rq->local_cand_hrrn = HRRN_PERCENT(&se->tt_node, sched_clock());
+	}
+#endif
 
 	update_stats_curr_start(cfs_rq, se);
 	cfs_rq->curr = se;
@@ -4661,7 +5249,7 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	 * If curr is set we have to see if its left of the leftmost entity
 	 * still in the tree, provided there was anything in the tree at all.
 	 */
-	if (!left || (curr && entity_before(curr, left)))
+	if (!left || (curr && entity_before(&curr->tt_node, &left->tt_node)))
 		left = curr;
 
 	se = left; /* ideally we run the leftmost entity */
@@ -4676,8 +5264,8 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 		if (se == curr) {
 			second = __pick_first_entity(cfs_rq);
 		} else {
-			second = __pick_next_entity(se);
-			if (!second || (curr && entity_before(curr, second)))
+			second = __pick_next_entity(cfs_rq, se);
+			if (!second || (curr && entity_before(&curr->tt_node, &second->tt_node)))
 				second = curr;
 		}
 
@@ -4759,6 +5347,10 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 
 	if (cfs_rq->nr_running > 1)
 		check_preempt_tick(cfs_rq, curr);
+#ifdef CONFIG_TT_SCHED
+	else if (IS_CAND_BL_ENABLED)
+		clear_rq_candidate(cfs_rq);
+#endif
 }
 
 
@@ -5787,6 +6379,11 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 			goto enqueue_throttle;
 	}
 
+#ifdef CONFIG_TT_SCHED
+	if (IS_CAND_BL_ENABLED)
+		update_candidate(cfs_rq);
+#endif
+
 	/* At this point se is NULL and we are at root level*/
 	add_nr_running(rq, 1);
 
@@ -6101,6 +6698,21 @@ wake_affine_weight(struct sched_domain *sd, struct task_struct *p,
 
 	return this_eff_load < prev_eff_load ? this_cpu : nr_cpumask_bits;
 }
+
+#ifdef CONFIG_TT_SCHED
+static int
+wake_affine_tt(struct task_struct *p, int this_cpu, int prev_cpu, int sync)
+{
+	int target = nr_cpumask_bits;
+
+	target = wake_affine_idle(this_cpu, prev_cpu, sync);
+
+	if (target == nr_cpumask_bits)
+		return prev_cpu;
+
+	return target;
+}
+#endif
 
 static int wake_affine(struct sched_domain *sd, struct task_struct *p,
 		       int this_cpu, int prev_cpu, int sync)
@@ -7020,15 +7632,31 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 	int want_affine = 0;
 	/* SD_flags and WF_flags share the first nibble */
 	int sd_flag = wake_flags & 0xF;
+#ifdef CONFIG_TT_SCHED
+	struct rq *rq = cpu_rq(prev_cpu);
+	unsigned int min_prev = rq->nr_running;
+	unsigned int min = rq->nr_running;
+	int this_cpu = smp_processor_id();
+#endif
+
 
 	/*
 	 * required for stable ->cpus_allowed
 	 */
 	lockdep_assert_held(&p->pi_lock);
+
+#ifdef CONFIG_TT_SCHED
+	if (IS_PWR_BL_ENABLED || (wake_flags & WF_TTWU)) {
+#else
 	if (wake_flags & WF_TTWU) {
+#endif
 		record_wakee(p);
 
+#ifdef CONFIG_TT_SCHED
+		if (IS_PWR_BL_ENABLED || sched_energy_enabled()) {
+#else
 		if (sched_energy_enabled()) {
+#endif
 			new_cpu = find_energy_efficient_cpu(p, prev_cpu);
 			if (new_cpu >= 0)
 				return new_cpu;
@@ -7038,41 +7666,66 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, p->cpus_ptr);
 	}
 
-	rcu_read_lock();
-	for_each_domain(cpu, tmp) {
-		/*
-		 * If both 'cpu' and 'prev_cpu' are part of this domain,
-		 * cpu is a valid SD_WAKE_AFFINE target.
-		 */
-		if (want_affine && (tmp->flags & SD_WAKE_AFFINE) &&
-		    cpumask_test_cpu(prev_cpu, sched_domain_span(tmp))) {
-			if (cpu != prev_cpu)
-				new_cpu = wake_affine(tmp, p, cpu, prev_cpu, sync);
+#ifdef CONFIG_TT_SCHED
+	if (!(IS_CFS_BL_ENABLED)) {
+		for_each_cpu_wrap(cpu, cpu_online_mask, this_cpu) {
+			if (unlikely(!cpumask_test_cpu(cpu, p->cpus_ptr)))
+				continue;
 
-			sd = NULL; /* Prefer wake_affine over balance flags */
-			break;
+			if (want_affine) {
+				if (cpu != prev_cpu)
+					new_cpu = wake_affine_tt(p, cpu, prev_cpu, sync);
+
+				return new_cpu;
+			}
+
+			if (cpu_rq(cpu)->nr_running < min) {
+				new_cpu = cpu;
+				min = cpu_rq(cpu)->nr_running;
+			}
 		}
 
-		/*
-		 * Usually only true for WF_EXEC and WF_FORK, as sched_domains
-		 * usually do not have SD_BALANCE_WAKE set. That means wakeup
-		 * will usually go to the fast path.
-		 */
-		if (tmp->flags & sd_flag)
-			sd = tmp;
-		else if (!want_affine)
-			break;
-	}
+		if (min == min_prev)
+			return prev_cpu;
+	} else {
+#endif
+		rcu_read_lock();
+		for_each_domain(cpu, tmp) {
+			/*
+			 * If both 'cpu' and 'prev_cpu' are part of this domain,
+			 * cpu is a valid SD_WAKE_AFFINE target.
+			 */
+			if (want_affine && (tmp->flags & SD_WAKE_AFFINE) &&
+			    cpumask_test_cpu(prev_cpu, sched_domain_span(tmp))) {
+				if (cpu != prev_cpu)
+					new_cpu = wake_affine(tmp, p, cpu, prev_cpu, sync);
 
-	if (unlikely(sd)) {
-		/* Slow path */
-		new_cpu = find_idlest_cpu(sd, p, cpu, prev_cpu, sd_flag);
-	} else if (wake_flags & WF_TTWU) { /* XXX always ? */
-		/* Fast path */
-		new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
-	}
-	rcu_read_unlock();
+				sd = NULL; /* Prefer wake_affine over balance flags */
+				break;
+			}
 
+			/*
+			 * Usually only true for WF_EXEC and WF_FORK, as sched_domains
+			 * usually do not have SD_BALANCE_WAKE set. That means wakeup
+			 * will usually go to the fast path.
+			 */
+			if (tmp->flags & sd_flag)
+				sd = tmp;
+			else if (!want_affine)
+				break;
+		}
+
+		if (unlikely(sd)) {
+			/* Slow path */
+			new_cpu = find_idlest_cpu(sd, p, cpu, prev_cpu, sd_flag);
+		} else if (wake_flags & WF_TTWU) { /* XXX always ? */
+			/* Fast path */
+			new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
+		}
+		rcu_read_unlock();
+#ifdef CONFIG_TT_SCHED
+	}
+#endif
 	return new_cpu;
 }
 
@@ -7128,6 +7781,10 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 
 	/* We have migrated, no longer consider this task hot */
 	se->exec_start = 0;
+
+#ifdef CONFIG_TT_SCHED
+	YIELD_UNMARK(&p->se.tt_node);
+#endif
 
 	update_scan_period(p, new_cpu);
 }
@@ -7365,6 +8022,17 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	struct task_struct *p;
 	int new_tasks;
 
+#ifdef CONFIG_TT_SCHED
+	if (IS_CAND_BL_ENABLED) {
+		/*
+		 * to cpu0, don't push any
+		 * candidates to this rq
+		 */
+		cfs_rq->local_cand_hrrn = 0;
+		clear_rq_candidate(cfs_rq);
+	}
+#endif
+
 again:
 	if (!sched_fair_runnable(rq))
 		goto idle;
@@ -7458,6 +8126,11 @@ simple:
 
 	p = task_of(se);
 
+#ifdef CONFIG_TT_SCHED
+	if (prev)
+		YIELD_UNMARK(&prev->se.tt_node);
+#endif
+
 done: __maybe_unused;
 #ifdef CONFIG_SMP
 	/*
@@ -7476,6 +8149,11 @@ done: __maybe_unused;
 	return p;
 
 idle:
+#ifdef CONFIG_TT_SCHED
+	if (IS_CAND_BL_ENABLED)
+		cfs_rq->local_cand_hrrn = MAX_HRRN;
+#endif
+
 	if (!rf)
 		return NULL;
 
@@ -7538,6 +8216,11 @@ static void yield_task_fair(struct rq *rq)
 		return;
 
 	clear_buddies(cfs_rq, se);
+
+#ifdef CONFIG_TT_SCHED
+	if (cfs_rq->h_nr_running > 1)
+		YIELD_MARK(&curr->se.tt_node);
+#endif
 
 	if (curr->policy != SCHED_BATCH) {
 		update_rq_clock(rq);
@@ -7776,6 +8459,47 @@ struct lb_env {
 /*
  * Is this task likely cache-hot:
  */
+#ifdef CONFIG_TT_SCHED
+static int task_hot_tt(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+{
+	s64 delta;
+
+	if (p->sched_class != &fair_sched_class)
+		return 0;
+
+	if (unlikely(task_has_idle_policy(p)))
+		return 0;
+
+	/* SMT siblings share cache */
+	if (cpus_share_cache(cpu_of(dst_rq), cpu_of(src_rq)))
+		return 0;
+
+	/*
+	 * Buddy candidates are cache hot:
+	 */
+	if (sched_feat(CACHE_HOT_BUDDY) && dst_rq->nr_running &&
+			(&p->se == cfs_rq_of(&p->se)->next ||
+			 &p->se == cfs_rq_of(&p->se)->last))
+		return 1;
+
+	if (sysctl_sched_migration_cost == -1)
+		return 1;
+
+	/*
+	 * Don't migrate task if the task's cookie does not match
+	 * with the destination CPU's core cookie.
+	 */
+	if (!sched_core_cookie_match(dst_rq, p))
+		return 1;
+
+	if (sysctl_sched_migration_cost == 0)
+		return 0;
+
+	delta = sched_clock() - p->se.exec_start;
+
+	return delta < (s64)sysctl_sched_migration_cost;
+}
+#endif
 static int task_hot(struct task_struct *p, struct lb_env *env)
 {
 	s64 delta;
@@ -7813,12 +8537,62 @@ static int task_hot(struct task_struct *p, struct lb_env *env)
 	if (sysctl_sched_migration_cost == 0)
 		return 0;
 
+#ifdef CONFIG_TT_SCHED
+	delta = sched_clock() - p->se.exec_start;
+#else
 	delta = rq_clock_task(env->src_rq) - p->se.exec_start;
+#endif
 
 	return delta < (s64)sysctl_sched_migration_cost;
 }
 
 #ifdef CONFIG_NUMA_BALANCING
+#ifdef CONFIG_TT_SCHED
+static int
+migrate_degrades_locality_tt(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+{
+	struct numa_group *numa_group = rcu_dereference(p->numa_group);
+	unsigned long src_weight, dst_weight;
+	int src_nid, dst_nid, dist;
+
+	if (!static_branch_likely(&sched_numa_balancing))
+		return -1;
+
+	src_nid = cpu_to_node(cpu_of(src_rq));
+	dst_nid = cpu_to_node(cpu_of(dst_rq));
+
+	if (src_nid == dst_nid)
+		return -1;
+
+	/* Migrating away from the preferred node is always bad. */
+	if (src_nid == p->numa_preferred_nid) {
+		if (src_rq->nr_running > src_rq->nr_preferred_running)
+			return 1;
+		else
+			return -1;
+	}
+
+	/* Encourage migration to the preferred node. */
+	if (dst_nid == p->numa_preferred_nid)
+		return 0;
+
+	/* Leaving a core idle is often worse than degrading locality. */
+	if (dst_rq->idle_balance)
+		return -1;
+
+	dist = node_distance(src_nid, dst_nid);
+	if (numa_group) {
+		src_weight = group_weight(p, src_nid, dist);
+		dst_weight = group_weight(p, dst_nid, dist);
+	} else {
+		src_weight = task_weight(p, src_nid, dist);
+		dst_weight = task_weight(p, dst_nid, dist);
+	}
+
+	return dst_weight < src_weight;
+}
+#endif
+
 /*
  * Returns 1, if task migration degrades locality
  * Returns 0, if task migration improves locality i.e migration preferred.
@@ -7871,6 +8645,13 @@ static int migrate_degrades_locality(struct task_struct *p, struct lb_env *env)
 }
 
 #else
+#if CONFIG_TT_SCHED
+migrate_degrades_locality_tt(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+{
+	return -1;
+}
+#endif
+
 static inline int migrate_degrades_locality(struct task_struct *p,
 					     struct lb_env *env)
 {
@@ -7878,6 +8659,60 @@ static inline int migrate_degrades_locality(struct task_struct *p,
 }
 #endif
 
+#ifdef CONFIG_TT_SCHED
+static int
+can_migrate_task_powersave(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+{
+	int tsk_cache_hot;
+
+	/* Disregard pcpu kthreads; they are where they need to be. */
+	if (kthread_is_per_cpu(p))
+		return 0;
+
+	if (!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr))
+		return 0;
+
+	if (task_running(src_rq, p))
+		return 0;
+
+	tsk_cache_hot = migrate_degrades_locality_tt(p, dst_rq, src_rq);
+	if (tsk_cache_hot == -1)
+		tsk_cache_hot = task_hot_tt(p, dst_rq, src_rq);
+
+	if (tsk_cache_hot > 0)
+		return 0;
+
+	if (p->se.tt_node.task_type < TT_CPU_BOUND)
+		return 0;
+
+	return 1;
+}
+
+static int
+can_migrate_task_tt(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+{
+	int tsk_cache_hot;
+
+	/* Disregard pcpu kthreads; they are where they need to be. */
+	if (kthread_is_per_cpu(p))
+		return 0;
+
+	if (!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr))
+		return 0;
+
+	if (task_running(src_rq, p))
+		return 0;
+
+	tsk_cache_hot = migrate_degrades_locality_tt(p, dst_rq, src_rq);
+	if (tsk_cache_hot == -1)
+		tsk_cache_hot = task_hot_tt(p, dst_rq, src_rq);
+
+	if (tsk_cache_hot > 0)
+		return 0;
+
+	return 1;
+}
+#endif
 /*
  * can_migrate_task - may task p from runqueue rq be migrated to this_cpu?
  */
@@ -10911,6 +11746,62 @@ static bool update_nohz_stats(struct rq *rq)
 	return rq->has_blocked_load;
 }
 
+#ifdef CONFIG_TT_SCHED
+static int move_task(struct rq *dist_rq, struct rq *src_rq, struct rq_flags *src_rf);
+
+static void idle_balance(struct rq *this_rq)
+{
+	int this_cpu = this_rq->cpu;
+	struct rq *src_rq;
+	int src_cpu = -1, cpu;
+	unsigned int max = 0;
+	struct rq_flags src_rf;
+
+	if (IS_CAND_BL_ENABLED) {
+		if (idle_pull_global_candidate(this_rq))
+			return;
+	} else if (IS_PWR_BL_ENABLED)
+		return;
+
+	for_each_online_cpu(cpu) {
+		/*
+		 * Stop searching for tasks to pull if there are
+		 * now runnable tasks on this rq.
+		 */
+		if (this_rq->nr_running > 0)
+			return;
+
+		if (cpu == this_cpu)
+			continue;
+
+		src_rq = cpu_rq(cpu);
+
+		if (src_rq->nr_running < 2)
+			continue;
+
+		if (src_rq->nr_running > max) {
+			max = src_rq->nr_running;
+			src_cpu = cpu;
+		}
+	}
+
+	if (src_cpu == -1)
+		return;
+
+	src_rq = cpu_rq(src_cpu);
+
+	rq_lock_irqsave(src_rq, &src_rf);
+	update_rq_clock(src_rq);
+
+	if (src_rq->nr_running < 2) {
+		rq_unlock(src_rq, &src_rf);
+		local_irq_restore(src_rf.flags);
+	} else {
+		move_task(this_rq, src_rq, &src_rf);
+	}
+}
+#endif
+
 /*
  * Internal function that runs load balance for all idle cpus. The load balance
  * can be a simple update of blocked load or a complete load balance with
@@ -10988,8 +11879,17 @@ static void _nohz_idle_balance(struct rq *this_rq, unsigned int flags,
 			update_rq_clock(rq);
 			rq_unlock_irqrestore(rq, &rf);
 
+#ifdef CONFIG_TT_SCHED
+			if (flags & NOHZ_BALANCE_KICK) {
+				if (!(IS_CFS_BL_ENABLED))
+					idle_balance(rq);
+				else
+					rebalance_domains(rq, CPU_IDLE);
+			}
+#else
 			if (flags & NOHZ_BALANCE_KICK)
 				rebalance_domains(rq, CPU_IDLE);
+#endif
 		}
 
 		if (time_after(next_balance, rq->next_balance)) {
@@ -11093,6 +11993,64 @@ static inline bool nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle
 static inline void nohz_newidle_balance(struct rq *this_rq) { }
 #endif /* CONFIG_NO_HZ_COMMON */
 
+#ifdef CONFIG_TT_SCHED
+static void update_curr_lightweight(struct cfs_rq *cfs_rq)
+{
+	struct sched_entity *curr = cfs_rq->curr;
+	struct tt_node *ttn = &curr->tt_node;
+	u64 now = sched_clock();
+	u64 delta_exec;
+
+	if (!curr)
+		return;
+
+	delta_exec = now - curr->exec_start;
+	if (unlikely((s64)delta_exec <= 0))
+		return;
+
+	curr->exec_start = now;
+	curr->sum_exec_runtime += delta_exec;
+	curr->vruntime += calc_delta_fair(delta_exec, curr);
+	update_min_vruntime(cfs_rq);
+
+	ttn->curr_burst += delta_exec;
+	ttn->vruntime += convert_to_vruntime(delta_exec, curr);
+	cfs_rq->local_cand_hrrn = HRRN_PERCENT(&curr->tt_node, now);
+}
+
+static void active_pull_global_candidate(struct rq *dist_rq);
+
+static void nohz_try_pull_from_candidate(void)
+{
+	int cpu;
+	struct rq *rq;
+	struct cfs_rq *cfs_rq;
+#ifdef CONFIG_NO_HZ_FULL
+	struct rq_flags rf;
+#endif
+
+	/* first, push to grq*/
+	for_each_online_cpu(cpu) {
+		rq = cpu_rq(cpu);
+#ifdef CONFIG_NO_HZ_FULL
+		cfs_rq = &rq->cfs;
+
+		if (idle_cpu(cpu) || cfs_rq->nr_running > 1)
+			goto out;
+
+		rq_lock_irqsave(rq, &rf);
+		update_rq_clock(rq);
+		update_curr_lightweight(cfs_rq);
+		rq_unlock_irqrestore(rq, &rf);
+out:
+#endif
+		if (idle_cpu(cpu) || !sched_fair_runnable(rq))
+			idle_pull_global_candidate(rq);
+		else
+			active_pull_global_candidate(rq);
+	}
+}
+
 /*
  * newidle_balance is called by schedule() if this_cpu is about to become
  * idle. Attempts to pull tasks from other CPUs.
@@ -11102,7 +12060,10 @@ static inline void nohz_newidle_balance(struct rq *this_rq) { }
  *     0 - failed, no new tasks
  *   > 0 - success, new (fair) tasks present
  */
+static int newidle_balance_cfs(struct rq *this_rq, struct rq_flags *rf)
+#else
 static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
+#endif
 {
 	unsigned long next_balance = jiffies + HZ;
 	int this_cpu = this_rq->cpu;
@@ -11224,6 +12185,327 @@ out:
 	return pulled_task;
 }
 
+#ifdef CONFIG_TT_SCHED
+static void pull_from(struct rq *dist_rq,
+		      struct rq *src_rq,
+		      struct rq_flags *src_rf,
+		      struct task_struct *p)
+{
+	struct rq_flags rf;
+
+	// detach task
+	deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
+	set_task_cpu(p, cpu_of(dist_rq));
+
+	// unlock src rq
+	rq_unlock(src_rq, src_rf);
+
+	// lock dist rq
+	rq_lock(dist_rq, &rf);
+	update_rq_clock(dist_rq);
+
+	activate_task(dist_rq, p, ENQUEUE_NOCLOCK);
+	check_preempt_curr(dist_rq, p, 0);
+
+	// unlock dist rq
+	rq_unlock(dist_rq, &rf);
+
+	local_irq_restore(src_rf->flags);
+}
+
+static int move_task_powersave(struct rq *dist_rq, struct rq *src_rq,
+			struct rq_flags *src_rf)
+{
+	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
+	struct task_struct *p;
+	struct tt_node *ttn = src_cfs_rq->head;
+
+	while (ttn) {
+		p = task_of(se_of(ttn));
+		if (can_migrate_task_powersave(p, dist_rq, src_rq)) {
+			pull_from(dist_rq, src_rq, src_rf, p);
+			return 1;
+		}
+
+		ttn = ttn->next;
+	}
+
+	/*
+	 * Here we know we have not migrated any task,
+	 * thus, we need to unlock and return 0
+	 * Note: the pull_from does the unlocking for us.
+	 */
+	rq_unlock(src_rq, src_rf);
+	local_irq_restore(src_rf->flags);
+
+	return 0;
+}
+
+static int move_task(struct rq *dist_rq, struct rq *src_rq,
+			struct rq_flags *src_rf)
+{
+	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
+	struct task_struct *p;
+	struct tt_node *ttn = src_cfs_rq->head;
+
+	while (ttn) {
+		p = task_of(se_of(ttn));
+		if (can_migrate_task_tt(p, dist_rq, src_rq)) {
+			pull_from(dist_rq, src_rq, src_rf, p);
+			return 1;
+		}
+
+		ttn = ttn->next;
+	}
+
+	/*
+	 * Here we know we have not migrated any task,
+	 * thus, we need to unlock and return 0
+	 * Note: the pull_from does the unlocking for us.
+	 */
+	rq_unlock(src_rq, src_rf);
+	local_irq_restore(src_rf->flags);
+
+	return 0;
+}
+
+static int
+can_migrate_candidate(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+{
+	/* Disregard pcpu kthreads; they are where they need to be. */
+	if (kthread_is_per_cpu(p))
+		return 0;
+
+	if (!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr))
+		return 0;
+
+	if (task_running(src_rq, p))
+		return 0;
+
+	return 1;
+}
+
+int idle_pull_global_candidate(struct rq *dist_rq)
+{
+	struct rq *src_rq;
+	struct task_struct *p;
+	struct rq_flags rf, src_rf;
+	struct tt_node *cand = READ_ONCE(global_candidate.candidate);
+
+	if (!cand)
+		return 0;
+
+	src_rq = READ_ONCE(global_candidate.rq);
+	if (!src_rq || src_rq == dist_rq)
+		return 0;
+
+	rq_lock_irqsave(src_rq, &src_rf);
+	update_rq_clock(src_rq);
+		raw_spin_lock(&global_candidate.lock);
+			cand = global_candidate.candidate;
+			if (!cand)
+				goto fail_unlock;
+
+			p = task_of(se_of(cand));
+			if (task_rq(p) != src_rq ||
+			    !can_migrate_candidate(p, dist_rq, src_rq))
+				goto fail_unlock;
+
+			global_candidate.rq = NULL;
+			global_candidate.candidate = NULL;
+			global_candidate.hrrn = MAX_HRRN;
+		raw_spin_unlock(&global_candidate.lock);
+
+		// detach task
+		deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
+		set_task_cpu(p, cpu_of(dist_rq));
+	// unlock src rq
+	rq_unlock(src_rq, &src_rf);
+
+	// lock dist rq
+	rq_lock(dist_rq, &rf);
+	update_rq_clock(dist_rq);
+		activate_task(dist_rq, p, ENQUEUE_NOCLOCK);
+		check_preempt_curr(dist_rq, p, 0);
+	// unlock dist rq
+	rq_unlock(dist_rq, &rf);
+
+	local_irq_restore(src_rf.flags);
+
+	return 1;
+
+fail_unlock:
+	raw_spin_unlock(&global_candidate.lock);
+	rq_unlock(src_rq, &src_rf);
+	local_irq_restore(src_rf.flags);
+	return 0;
+}
+
+static void active_pull_global_candidate(struct rq *dist_rq)
+{
+	struct cfs_rq *cfs_rq = &dist_rq->cfs;
+	u64 cand_hrrn = READ_ONCE(global_candidate.hrrn);
+	u64 local_hrrn = READ_ONCE(cfs_rq->local_cand_hrrn);
+	struct rq *src_rq;
+	struct task_struct *p;
+	struct rq_flags rf, src_rf;
+	struct tt_node *cand;
+
+	cand = READ_ONCE(global_candidate.candidate);
+
+	if (!cand)
+		return;
+
+	if ((s64)(local_hrrn - cand_hrrn) <= 0)
+		return;
+
+	src_rq = READ_ONCE(global_candidate.rq);
+	if (!src_rq || src_rq == dist_rq)
+		return;
+
+	rq_lock_irqsave(src_rq, &src_rf);
+	update_rq_clock(src_rq);
+		raw_spin_lock(&global_candidate.lock);
+			cand = global_candidate.candidate;
+			cand_hrrn = global_candidate.hrrn;
+
+			if (!cand)
+				goto fail_unlock;
+
+			p = task_of(se_of(cand));
+			if (task_rq(p) != src_rq ||
+			    !can_migrate_candidate(p, dist_rq, src_rq))
+				goto fail_unlock;
+
+			if ((s64)(local_hrrn - cand_hrrn) <= 0)
+				goto fail_unlock;
+
+			global_candidate.rq = NULL;
+			global_candidate.candidate = NULL;
+			global_candidate.hrrn = MAX_HRRN;
+		raw_spin_unlock(&global_candidate.lock);
+
+		// detach task
+		deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
+		set_task_cpu(p, cpu_of(dist_rq));
+	// unlock src rq
+	rq_unlock(src_rq, &src_rf);
+
+	// lock dist rq
+	rq_lock(dist_rq, &rf);
+	update_rq_clock(dist_rq);
+		activate_task(dist_rq, p, ENQUEUE_NOCLOCK);
+		check_preempt_curr(dist_rq, p, 0);
+	// unlock dist rq
+	rq_unlock(dist_rq, &rf);
+
+	local_irq_restore(src_rf.flags);
+
+	return;
+
+fail_unlock:
+	raw_spin_unlock(&global_candidate.lock);
+	rq_unlock(src_rq, &src_rf);
+	local_irq_restore(src_rf.flags);
+}
+
+static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
+{
+	int this_cpu = this_rq->cpu;
+	struct rq *src_rq;
+	int src_cpu = -1, cpu;
+	int pulled_task = 0;
+	unsigned int max = 0;
+	struct rq_flags src_rf;
+
+	if (IS_CFS_BL_ENABLED)
+		return newidle_balance_cfs(this_rq, rf);
+
+	/*
+	 * We must set idle_stamp _before_ calling idle_balance(), such that we
+	 * measure the duration of idle_balance() as idle time.
+	 */
+	this_rq->idle_stamp = rq_clock(this_rq);
+
+	/*
+	 * Do not pull tasks towards !active CPUs...
+	 */
+	if (IS_PWR_BL_ENABLED || !cpu_active(this_cpu))
+		return 0;
+
+	rq_unpin_lock(this_rq, rf);
+	raw_spin_unlock(&this_rq->__lock);
+
+	update_blocked_averages(this_cpu);
+
+	if (IS_CAND_BL_ENABLED) {
+		pulled_task = idle_pull_global_candidate(this_rq);
+		if (pulled_task)
+			goto out;
+	}
+
+	for_each_online_cpu(cpu) {
+		/*
+		 * Stop searching for tasks to pull if there are
+		 * now runnable tasks on this rq.
+		 */
+		if (this_rq->nr_running > 0)
+			goto out;
+
+		if (cpu == this_cpu)
+			continue;
+
+		src_rq = cpu_rq(cpu);
+
+		if (src_rq->nr_running < 2)
+			continue;
+
+		if (src_rq->nr_running > max) {
+			max = src_rq->nr_running;
+			src_cpu = cpu;
+		}
+	}
+
+	if (src_cpu != -1) {
+		src_rq = cpu_rq(src_cpu);
+
+		rq_lock_irqsave(src_rq, &src_rf);
+		update_rq_clock(src_rq);
+
+		if (src_rq->nr_running < 2) {
+			rq_unlock(src_rq, &src_rf);
+			local_irq_restore(src_rf.flags);
+		} else {
+			pulled_task = move_task(this_rq, src_rq, &src_rf);
+		}
+	}
+
+out:
+	raw_spin_lock(&this_rq->__lock);
+
+	/*
+	 * While browsing the domains, we released the rq lock, a task could
+	 * have been enqueued in the meantime. Since we're not going idle,
+	 * pretend we pulled a task.
+	 */
+	if (this_rq->cfs.h_nr_running && !pulled_task)
+		pulled_task = 1;
+
+	/* Is there a task of a high priority class? */
+	if (this_rq->nr_running != this_rq->cfs.h_nr_running)
+		pulled_task = -1;
+
+	if (pulled_task)
+		this_rq->idle_stamp = 0;
+	else
+		nohz_newidle_balance(this_rq);
+
+	rq_repin_lock(this_rq, rf);
+
+	return pulled_task;
+}
+#endif
+
 /*
  * run_rebalance_domains is triggered when needed from the scheduler tick.
  * Also triggered for nohz idle balancing (with nohz_balancing_kick set).
@@ -11247,7 +12529,11 @@ static __latent_entropy void run_rebalance_domains(struct softirq_action *h)
 
 	/* normal load balance */
 	update_blocked_averages(this_rq->cpu);
-	rebalance_domains(this_rq, idle);
+
+#ifdef CONFIG_TT_SCHED
+	if (IS_CFS_BL_ENABLED)
+#endif
+		rebalance_domains(this_rq, idle);
 }
 
 /*
@@ -11255,6 +12541,14 @@ static __latent_entropy void run_rebalance_domains(struct softirq_action *h)
  */
 void trigger_load_balance(struct rq *rq)
 {
+#ifdef CONFIG_TT_SCHED
+	struct rq *this_rq = rq;
+	int this_cpu = cpu_of(this_rq);
+	int cpu;
+	unsigned int max, min;
+	struct rq *max_rq, *min_rq, *c_rq;
+	struct rq_flags src_rf;
+#endif
 	/*
 	 * Don't need to rebalance while attached to NULL domain or
 	 * runqueue CPU is not active
@@ -11262,9 +12556,77 @@ void trigger_load_balance(struct rq *rq)
 	if (unlikely(on_null_domain(rq) || !cpu_active(cpu_of(rq))))
 		return;
 
+#ifdef CONFIG_TT_SCHED
+	if (IS_CFS_BL_ENABLED)
+		goto cfs_balance;
+
+	if (this_cpu != 0)
+		goto out;
+
+	if (IS_CAND_BL_ENABLED)
+		nohz_try_pull_from_candidate();
+
+	max = min = this_rq->nr_running;
+	max_rq = min_rq = this_rq;
+
+	for_each_online_cpu(cpu) {
+		c_rq = cpu_rq(cpu);
+
+		/*
+		 * Don't need to rebalance while attached to NULL domain or
+		 * runqueue CPU is not active
+		 */
+		if (unlikely(on_null_domain(c_rq) || !cpu_active(cpu)))
+			continue;
+
+		if (c_rq->nr_running < min) {
+			min = c_rq->nr_running;
+			min_rq = c_rq;
+		}
+
+		if (c_rq->nr_running > max) {
+			max = c_rq->nr_running;
+			max_rq = c_rq;
+		}
+	}
+
+	if (min_rq == max_rq || max - min < 2)
+		goto out;
+
+	rq_lock_irqsave(max_rq, &src_rf);
+	update_rq_clock(max_rq);
+
+	if (max_rq->nr_running < 2) {
+		rq_unlock(max_rq, &src_rf);
+		local_irq_restore(src_rf.flags);
+		goto out;
+	}
+
+	if (IS_PWR_BL_ENABLED && idle_cpu(cpu_of(min_rq)) && max - min == 2)
+		move_task_powersave(min_rq, max_rq, &src_rf);
+	else
+		move_task(min_rq, max_rq, &src_rf);
+
+out:
+	if (time_after_eq(jiffies, this_rq->next_balance)) {
+		this_rq->next_balance = jiffies + msecs_to_jiffies(19);
+		update_blocked_averages(this_rq->cpu);
+	}
+
+	if (time_after_eq(jiffies, this_rq->lat_decay)) {
+		this_rq->lat_decay = jiffies + msecs_to_jiffies(4);
+		dec_nr_lat_sensitive(this_rq->cpu);
+	}
+
+	goto tt_balance;
+
+cfs_balance:
+#endif
+
 	if (time_after_eq(jiffies, rq->next_balance))
 		raise_softirq(SCHED_SOFTIRQ);
 
+tt_balance:
 	nohz_balancer_kick(rq);
 }
 
@@ -11437,6 +12799,19 @@ static void task_fork_fair(struct task_struct *p)
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
 
+#ifdef CONFIG_TT_SCHED
+	struct tt_node *ttn = &p->se.tt_node;
+
+	ttn->task_type		= TT_NO_TYPE;
+	ttn->vruntime		= 1;
+	ttn->prev_wait_time	= 0;
+	ttn->wait_time		= 0;
+	ttn->prev_burst		= 0;
+	ttn->burst		= 0;
+	ttn->curr_burst		= 0;
+	ttn->rt_sticky		= 0;
+#endif
+
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
 
@@ -11448,7 +12823,7 @@ static void task_fork_fair(struct task_struct *p)
 	}
 	place_entity(cfs_rq, se, 1);
 
-	if (sysctl_sched_child_runs_first && curr && entity_before(curr, se)) {
+	if (sysctl_sched_child_runs_first && curr && entity_before(&curr->tt_node, &se->tt_node)) {
 		/*
 		 * Upon rescheduling, sched_class::put_prev_task() will place
 		 * 'current' within the tree based on its new key value.
