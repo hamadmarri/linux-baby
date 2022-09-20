@@ -106,7 +106,7 @@ unsigned int sysctl_sched_idle_min_granularity			= 750000ULL;
 static unsigned int sched_nr_latency = 8;
 
 #ifdef CONFIG_TT_SCHED
-unsigned int __read_mostly tt_balancer_opt	= 0;
+unsigned int __read_mostly tt_balancer_opt	= TT_BL_CFS;
 unsigned int __read_mostly tt_max_lifetime	= 22000; // in ms
 int __read_mostly tt_rt_prio			= -20;
 int __read_mostly tt_interactive_prio		= -10;
@@ -8646,7 +8646,7 @@ static int migrate_degrades_locality(struct task_struct *p, struct lb_env *env)
 
 #else
 #if CONFIG_TT_SCHED
-migrate_degrades_locality_tt(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+static int migrate_degrades_locality_tt(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
 {
 	return -1;
 }
@@ -12613,11 +12613,6 @@ out:
 		update_blocked_averages(this_rq->cpu);
 	}
 
-	if (time_after_eq(jiffies, this_rq->lat_decay)) {
-		this_rq->lat_decay = jiffies + msecs_to_jiffies(4);
-		dec_nr_lat_sensitive(this_rq->cpu);
-	}
-
 	goto tt_balance;
 
 cfs_balance:
@@ -12626,8 +12621,14 @@ cfs_balance:
 	if (time_after_eq(jiffies, rq->next_balance))
 		raise_softirq(SCHED_SOFTIRQ);
 
+#ifdef CONFIG_TT_SCHED
+	if (time_after_eq(jiffies, this_rq->lat_decay)) {
+		this_rq->lat_decay = jiffies + msecs_to_jiffies(4);
+		dec_nr_lat_sensitive(this_rq->cpu);
+	}
 tt_balance:
 	nohz_balancer_kick(rq);
+#endif
 }
 
 static void rq_online_fair(struct rq *rq)
