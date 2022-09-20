@@ -12622,11 +12622,12 @@ cfs_balance:
 		raise_softirq(SCHED_SOFTIRQ);
 
 #ifdef CONFIG_TT_SCHED
+tt_balance:
 	if (time_after_eq(jiffies, this_rq->lat_decay)) {
 		this_rq->lat_decay = jiffies + msecs_to_jiffies(4);
 		dec_nr_lat_sensitive(this_rq->cpu);
 	}
-tt_balance:
+
 	nohz_balancer_kick(rq);
 #endif
 }
