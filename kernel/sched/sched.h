@@ -135,6 +135,7 @@ extern int tt_rt_prio;
 extern int tt_interactive_prio;
 extern int tt_cpu_bound_prio;
 extern int tt_batch_prio;
+extern int tt_lat_sens_enabled;
 #endif
 
 extern void calc_global_load_tick(struct rq *this_rq);
@@ -1058,9 +1059,6 @@ struct rq {
 	struct task_struct	*idle;
 	struct task_struct	*stop;
 	unsigned long		next_balance;
-#ifdef CONFIG_TT_SCHED
-	unsigned long		lat_decay;
-#endif
 	struct mm_struct	*prev_mm;
 
 	unsigned int		clock_update_flags;
@@ -2486,6 +2484,7 @@ extern void deactivate_task(struct rq *rq, struct task_struct *p, int flags);
 extern void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags);
 
 #ifdef CONFIG_TT_SCHED
+extern inline void inc_nr_lat_sensitive(unsigned int cpu);
 extern inline void dec_nr_lat_sensitive(unsigned int cpu);
 #endif
 

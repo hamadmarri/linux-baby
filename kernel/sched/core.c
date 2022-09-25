@@ -3080,10 +3080,16 @@ void relax_compatible_cpus_allowed_ptr(struct task_struct *p)
 }
 
 #ifdef CONFIG_TT_SCHED
+inline void inc_nr_lat_sensitive(unsigned int cpu)
+{
+	if (tt_lat_sens_enabled)
+		per_cpu(nr_lat_sensitive, cpu)++;
+}
+
 inline void dec_nr_lat_sensitive(unsigned int cpu)
 {
 	if (per_cpu(nr_lat_sensitive, cpu))
-		per_cpu(nr_lat_sensitive, cpu)--;
+		per_cpu(nr_lat_sensitive, cpu) >>= 1;
 }
 #endif
 
@@ -3135,7 +3141,7 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 #ifdef CONFIG_TT_SCHED
 		if (task_is_lat_sensitive(p)) {
 			dec_nr_lat_sensitive(task_cpu(p));
-			per_cpu(nr_lat_sensitive, new_cpu)++;
+			inc_nr_lat_sensitive(new_cpu);
 		}
 #endif
 		if (p->sched_class->migrate_task_rq)
@@ -4553,6 +4559,15 @@ static struct ctl_table sched_core_sysctls[] = {
 		.extra1		= SYSCTL_NEG_TWENTY,
 		.extra2		= SYSCTL_NINETEEN,
 	},
+	{
+		.procname	= "sched_tt_lat_sens_enabled",
+		.data		= &tt_lat_sens_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
 #endif
 #ifdef CONFIG_SCHEDSTATS
 	{
@@ -4752,7 +4767,7 @@ void wake_up_new_task(struct task_struct *p)
 
 #ifdef CONFIG_TT_SCHED
 	if (task_is_lat_sensitive(p))
-		per_cpu(nr_lat_sensitive, target_cpu)++;
+		inc_nr_lat_sensitive(target_cpu);
 #endif
 
 	update_rq_clock(rq);
@@ -5546,6 +5561,10 @@ void scheduler_tick(void)
 
 	perf_event_task_tick();
 
+#ifdef CONFIG_TT_SCHED
+	dec_nr_lat_sensitive(rq->cpu);
+#endif
+
 #ifdef CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
 	trigger_load_balance(rq);
@@ -6127,11 +6146,6 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	 */
 	for_each_cpu(i, smt_mask) {
 		rq_i = cpu_rq(i);
-
-#ifdef CONFIG_TT_SCHED
-		if (task_is_lat_sensitive(prev))
-			dec_nr_lat_sensitive(prev->cpu);
-#endif
 
 		/*
 		 * An online sibling might have gone offline before a task
@@ -9821,9 +9835,6 @@ void __init sched_init(void)
 		rq->balance_callback = &balance_push_callback;
 		rq->active_balance = 0;
 		rq->next_balance = jiffies;
-#ifdef CONFIG_TT_SCHED
-		rq->lat_decay = jiffies;
-#endif
 		rq->push_cpu = 0;
 		rq->cpu = i;
 		rq->online = 0;

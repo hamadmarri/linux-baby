@@ -112,6 +112,7 @@ int __read_mostly tt_rt_prio			= -20;
 int __read_mostly tt_interactive_prio		= -10;
 int __read_mostly tt_cpu_bound_prio		= -15;
 int __read_mostly tt_batch_prio			=  19;
+int __read_mostly tt_lat_sens_enabled		=  1;
 
 #define MAX_HRRN				0xFFFFFFFFFFFFFFFULL
 #define YIELD_MARK(ttn)				((ttn)->vruntime |= 0x8000000000000000ULL)
@@ -1179,7 +1180,7 @@ static void detect_type(struct tt_node *ttn, u64 now, int flags)
 		 * TT_BATCH		4
 		 */
 		if (new_type <= TT_INTERACTIVE && old_type > TT_INTERACTIVE)
-			per_cpu(nr_lat_sensitive, cpu)++;
+			inc_nr_lat_sensitive(cpu);
 		else if (old_type <= TT_INTERACTIVE && new_type > TT_INTERACTIVE)
 			dec_nr_lat_sensitive(cpu);
 	}
@@ -5041,7 +5042,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 			avg_wait /= 2ULL;
 
 			if (LEQ(avg_wait, HZ_PERIOD))
-				per_cpu(nr_lat_sensitive, cpu_of(rq_of(cfs_rq)))++;
+				inc_nr_lat_sensitive(cpu_of(rq_of(cfs_rq)));
 		}
 	}
 #endif
@@ -12613,23 +12614,15 @@ out:
 		update_blocked_averages(this_rq->cpu);
 	}
 
-	goto tt_balance;
+	nohz_balancer_kick(rq);
+	return;
 
 cfs_balance:
 #endif
-
 	if (time_after_eq(jiffies, rq->next_balance))
 		raise_softirq(SCHED_SOFTIRQ);
 
-#ifdef CONFIG_TT_SCHED
-tt_balance:
-	if (time_after_eq(jiffies, this_rq->lat_decay)) {
-		this_rq->lat_decay = jiffies + msecs_to_jiffies(4);
-		dec_nr_lat_sensitive(this_rq->cpu);
-	}
-
 	nohz_balancer_kick(rq);
-#endif
 }
 
 static void rq_online_fair(struct rq *rq)
