@@ -625,6 +625,7 @@ struct cfs_rq {
 	struct sched_entity	*curr;
 #ifdef CONFIG_TT_SCHED
 	struct tt_node		*head;
+	struct tt_node		*dedicated_cpu_bound;
 	u64			local_cand_hrrn;
 #endif /* CONFIG_TT_SCHED */
 

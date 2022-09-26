@@ -1138,7 +1138,36 @@ static inline bool is_batch(struct tt_node *ttn, u64 _hrrn)
 	return (LES(_hrrn, 2ULL));
 }
 
-static void detect_type(struct tt_node *ttn, u64 now, int flags)
+static inline void set_dedicated_cpu_bound(struct cfs_rq *cfs_rq, struct tt_node *ttn)
+{
+	cfs_rq->dedicated_cpu_bound = ttn;
+}
+
+static inline void unset_dedicated_cpu_bound(struct cfs_rq *cfs_rq)
+{
+	cfs_rq->dedicated_cpu_bound = NULL;
+}
+
+static void check_dedicated_cpu_bound(struct cfs_rq *cfs_rq)
+{
+	struct tt_node *ttn = cfs_rq->head;
+	struct tt_node *d_ttn = cfs_rq->dedicated_cpu_bound;
+
+	if (!d_ttn)
+		goto out;
+
+	while (ttn) {
+		if (ttn == d_ttn)
+			return;
+
+		ttn = ttn->next;
+	}
+
+out:
+	cfs_rq->dedicated_cpu_bound = NULL;
+}
+
+static void detect_type(struct cfs_rq *cfs_rq, struct tt_node *ttn, u64 now, int flags)
 {
 	unsigned int new_type = TT_NO_TYPE;
 	unsigned int old_type = ttn->task_type;
@@ -1179,10 +1208,18 @@ static void detect_type(struct tt_node *ttn, u64 now, int flags)
 		 * TT_CPU_BOUND		3
 		 * TT_BATCH		4
 		 */
+
+		/* set latency sensitive */
 		if (new_type <= TT_INTERACTIVE && old_type > TT_INTERACTIVE)
 			inc_nr_lat_sensitive(cpu);
 		else if (old_type <= TT_INTERACTIVE && new_type > TT_INTERACTIVE)
 			dec_nr_lat_sensitive(cpu);
+
+		/* set dedicated cpu bound */
+		if (!cfs_rq->dedicated_cpu_bound && new_type == TT_CPU_BOUND)
+			set_dedicated_cpu_bound(cfs_rq, ttn);
+		else if (cfs_rq->dedicated_cpu_bound == ttn && old_type == TT_CPU_BOUND)
+			unset_dedicated_cpu_bound(cfs_rq);
 	}
 
 	ttn->task_type = new_type;
@@ -1292,7 +1329,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 #ifdef CONFIG_TT_SCHED
 	ttn->curr_burst	+= delta_exec;
 	ttn->vruntime	+= convert_to_vruntime(delta_exec, curr);
-	detect_type(ttn, now, 0);
+	detect_type(cfs_rq, ttn, now, 0);
 	normalize_lifetime(now, &curr->tt_node);
 
 	if (IS_CAND_BL_ENABLED) {
@@ -4816,11 +4853,11 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	if (wakeup) {
 		wait = now - se->exec_start;
 		ttn->wait_time += wait;
-		detect_type(ttn, now, flags);
+		detect_type(cfs_rq, ttn, now, flags);
 
 		ttn->prev_wait_time = wait;
 	} else {
-		detect_type(ttn, now, flags);
+		detect_type(cfs_rq, ttn, now, flags);
 	}
 #endif
 	/*
@@ -5323,6 +5360,9 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	 */
 	update_curr(cfs_rq);
 
+#ifdef CONFIG_TT_SCHED
+	check_dedicated_cpu_bound(cfs_rq);
+#endif
 	/*
 	 * Ensure that runnable average is periodically updated.
 	 */
@@ -8701,6 +8741,10 @@ can_migrate_task_tt(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
 	if (!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr))
 		return 0;
 
+	/* if this a cpu bound task and dedicated to this cpus, then no*/
+	if (src_rq->cfs.dedicated_cpu_bound == &p->se.tt_node && cpumask_test_cpu(cpu_of(src_rq), p->cpus_ptr))
+		return 0;
+
 	if (task_running(src_rq, p))
 		return 0;
 
@@ -8770,6 +8814,12 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 
 		return 0;
 	}
+
+#ifdef CONFIG_TT_SCHED
+	/* if this a cpu bound task and dedicated to this cpus, then no*/
+	if (env->src_rq->cfs.dedicated_cpu_bound == &p->se.tt_node && cpumask_test_cpu(cpu_of(env->src_rq), p->cpus_ptr))
+		return 0;
+#endif
 
 	/* Record that we found at least one task that could run on dst_cpu */
 	env->flags &= ~LBF_ALL_PINNED;
@@ -13030,6 +13080,11 @@ void init_cfs_rq(struct cfs_rq *cfs_rq)
 {
 	cfs_rq->tasks_timeline = RB_ROOT_CACHED;
 	u64_u32_store(cfs_rq->min_vruntime, (u64)(-(1LL << 20)));
+
+#ifdef CONFIG_TT_SCHED
+	cfs_rq->dedicated_cpu_bound = NULL;
+#endif
+
 #ifdef CONFIG_SMP
 	raw_spin_lock_init(&cfs_rq->removed.lock);
 #endif
