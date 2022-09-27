@@ -106,13 +106,14 @@ unsigned int sysctl_sched_idle_min_granularity			= 750000ULL;
 static unsigned int sched_nr_latency = 8;
 
 #ifdef CONFIG_TT_SCHED
-unsigned int __read_mostly tt_balancer_opt	= TT_BL_CFS;
-unsigned int __read_mostly tt_max_lifetime	= 22000; // in ms
-int __read_mostly tt_rt_prio			= -20;
-int __read_mostly tt_interactive_prio		= -10;
-int __read_mostly tt_cpu_bound_prio		= -15;
-int __read_mostly tt_batch_prio			=  19;
-int __read_mostly tt_lat_sens_enabled		=  1;
+unsigned int __read_mostly tt_balancer_opt		= TT_BL_CFS;
+unsigned int __read_mostly tt_max_lifetime		= 22000; // in ms
+int __read_mostly tt_rt_prio				= -20;
+int __read_mostly tt_interactive_prio			= -10;
+int __read_mostly tt_cpu_bound_prio			= -15;
+int __read_mostly tt_batch_prio				=  19;
+int __read_mostly tt_lat_sens_enabled			=  1;
+int __read_mostly tt_dedicated_cpu_bound_enabled	=  1;
 
 #define MAX_HRRN				0xFFFFFFFFFFFFFFFULL
 #define YIELD_MARK(ttn)				((ttn)->vruntime |= 0x8000000000000000ULL)
@@ -1140,7 +1141,8 @@ static inline bool is_batch(struct tt_node *ttn, u64 _hrrn)
 
 static inline void set_dedicated_cpu_bound(struct cfs_rq *cfs_rq, struct tt_node *ttn)
 {
-	cfs_rq->dedicated_cpu_bound = ttn;
+	if (tt_dedicated_cpu_bound_enabled)
+		cfs_rq->dedicated_cpu_bound = ttn;
 }
 
 static inline void unset_dedicated_cpu_bound(struct cfs_rq *cfs_rq)
@@ -1153,6 +1155,9 @@ static void check_dedicated_cpu_bound(struct cfs_rq *cfs_rq)
 	struct tt_node *ttn		= cfs_rq->head;
 	struct tt_node *curr_ttn	= &cfs_rq->curr->tt_node;
 	struct tt_node *d_ttn		= cfs_rq->dedicated_cpu_bound;
+
+	if (!tt_dedicated_cpu_bound_enabled)
+		return;
 
 	if (!d_ttn)
 		goto out;

@@ -136,6 +136,7 @@ extern int tt_interactive_prio;
 extern int tt_cpu_bound_prio;
 extern int tt_batch_prio;
 extern int tt_lat_sens_enabled;
+extern int tt_dedicated_cpu_bound_enabled;
 #endif
 
 extern void calc_global_load_tick(struct rq *this_rq);

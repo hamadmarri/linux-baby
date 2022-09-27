@@ -2938,6 +2938,12 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 	struct rq *rq;
 
 	rq = task_rq_lock(p, &rf);
+
+#ifdef CONFIG_TT_SCHED
+	if (rq->cfs.dedicated_cpu_bound == &p->se.tt_node)
+		rq->cfs.dedicated_cpu_bound = NULL;
+#endif
+
 	return __set_cpus_allowed_ptr_locked(p, new_mask, flags, rq, &rf);
 }
 
@@ -4562,6 +4568,15 @@ static struct ctl_table sched_core_sysctls[] = {
 	{
 		.procname	= "sched_tt_lat_sens_enabled",
 		.data		= &tt_lat_sens_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "sched_tt_dedicated_cpu_bound_enabled",
+		.data		= &tt_dedicated_cpu_bound_enabled,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
