@@ -1150,11 +1150,15 @@ static inline void unset_dedicated_cpu_bound(struct cfs_rq *cfs_rq)
 
 static void check_dedicated_cpu_bound(struct cfs_rq *cfs_rq)
 {
-	struct tt_node *ttn = cfs_rq->head;
-	struct tt_node *d_ttn = cfs_rq->dedicated_cpu_bound;
+	struct tt_node *ttn		= cfs_rq->head;
+	struct tt_node *curr_ttn	= &cfs_rq->curr->tt_node;
+	struct tt_node *d_ttn		= cfs_rq->dedicated_cpu_bound;
 
 	if (!d_ttn)
 		goto out;
+
+	if (curr_ttn == d_ttn)
+		return;
 
 	while (ttn) {
 		if (ttn == d_ttn)
@@ -1164,7 +1168,7 @@ static void check_dedicated_cpu_bound(struct cfs_rq *cfs_rq)
 	}
 
 out:
-	cfs_rq->dedicated_cpu_bound = NULL;
+	unset_dedicated_cpu_bound(cfs_rq);
 }
 
 static void detect_type(struct cfs_rq *cfs_rq, struct tt_node *ttn, u64 now, int flags)
