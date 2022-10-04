@@ -8751,7 +8751,9 @@ can_migrate_task_tt(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
 		return 0;
 
 	/* if this a cpu bound task and dedicated to this cpus, then no*/
-	if (src_rq->cfs.dedicated_cpu_bound == &p->se.tt_node && cpumask_test_cpu(cpu_of(src_rq), p->cpus_ptr))
+	if (tt_dedicated_cpu_bound_enabled &&
+			src_rq->cfs.dedicated_cpu_bound == &p->se.tt_node &&
+			cpumask_test_cpu(cpu_of(src_rq), p->cpus_ptr))
 		return 0;
 
 	if (task_running(src_rq, p))
@@ -8826,7 +8828,9 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 
 #ifdef CONFIG_TT_SCHED
 	/* if this a cpu bound task and dedicated to this cpus, then no*/
-	if (env->src_rq->cfs.dedicated_cpu_bound == &p->se.tt_node && cpumask_test_cpu(cpu_of(env->src_rq), p->cpus_ptr))
+	if (tt_dedicated_cpu_bound_enabled &&
+			env->src_rq->cfs.dedicated_cpu_bound == &p->se.tt_node &&
+			cpumask_test_cpu(cpu_of(env->src_rq), p->cpus_ptr))
 		return 0;
 #endif
 

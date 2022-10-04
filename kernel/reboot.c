@@ -23,6 +23,10 @@
  * this indicates whether you can reboot with ctrl-alt-del: the default is yes
  */
 
+#ifdef CONFIG_TT_SCHED
+extern int tt_dedicated_cpu_bound_enabled;
+#endif
+
 static int C_A_D = 1;
 struct pid *cad_pid;
 EXPORT_SYMBOL(cad_pid);
@@ -229,6 +233,10 @@ void migrate_to_reboot_cpu(void)
 {
 	/* The boot cpu is always logical cpu 0 */
 	int cpu = reboot_cpu;
+
+#ifdef CONFIG_TT_SCHED
+	tt_dedicated_cpu_bound_enabled = 0;
+#endif
 
 	cpu_hotplug_disable();
 
