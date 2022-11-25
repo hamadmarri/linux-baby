@@ -5185,7 +5185,7 @@ can_be_candidate(struct tt_node *ttn, int this_cpu)
 	if (p->se.avg.last_update_time == 0)
 		return 0;
 
-	if (task_running(cpu_rq(this_cpu), p))
+	if (task_on_cpu(cpu_rq(this_cpu), p))
 		return 0;
 
 	// some tasks are pinned to this cpu
@@ -5245,10 +5245,6 @@ static void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	int action = UPDATE_TG;
-
-	if (entity_is_task(se) && task_on_rq_migrating(task_of(se)))
-		action |= DO_DETACH;
-
 #ifdef CONFIG_TT_SCHED
 	struct tt_node *ttn = &se->tt_node;
 	bool sleep = (flags & DEQUEUE_SLEEP);
@@ -5271,6 +5267,9 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 		}
 	}
 #endif
+
+	if (entity_is_task(se) && task_on_rq_migrating(task_of(se)))
+		action |= DO_DETACH;
 
 	/*
 	 * Update run-time statistics of the 'current'.
@@ -8888,7 +8887,7 @@ can_migrate_task_powersave(struct task_struct *p, struct rq *dst_rq, struct rq *
 	if (!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr))
 		return 0;
 
-	if (task_running(src_rq, p))
+	if (task_on_cpu(src_rq, p))
 		return 0;
 
 	tsk_cache_hot = migrate_degrades_locality_tt(p, dst_rq, src_rq);
@@ -8922,7 +8921,7 @@ can_migrate_task_tt(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
 			cpumask_test_cpu(cpu_of(src_rq), p->cpus_ptr))
 		return 0;
 
-	if (task_running(src_rq, p))
+	if (task_on_cpu(src_rq, p))
 		return 0;
 
 	tsk_cache_hot = migrate_degrades_locality_tt(p, dst_rq, src_rq);
@@ -12511,7 +12510,7 @@ can_migrate_candidate(struct task_struct *p, struct rq *dst_rq, struct rq *src_r
 	if (!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr))
 		return 0;
 
-	if (task_running(src_rq, p))
+	if (task_on_cpu(src_rq, p))
 		return 0;
 
 	return 1;
