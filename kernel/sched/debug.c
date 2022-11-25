@@ -957,6 +957,22 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 #define P_SCHEDSTAT(F)  __PS(#F, schedstat_val(p->stats.F))
 #define PN_SCHEDSTAT(F) __PSN(#F, schedstat_val(p->stats.F))
 
+
+#ifdef CONFIG_TT_SCHED
+#define PN_TT(F, S) SEQ_printf(m, "%-45s: %20s\n", #F, #S)
+
+	if (p->se.tt_node.task_type == TT_NO_TYPE)
+		PN_TT(task_type, NO_TYPE);
+	else if (p->se.tt_node.task_type == TT_INTERACTIVE)
+		PN_TT(task_type, INTERACTIVE);
+	else if (p->se.tt_node.task_type == TT_REALTIME)
+		PN_TT(task_type, REALTIME);
+	else if (p->se.tt_node.task_type == TT_CPU_BOUND)
+		PN_TT(task_type, CPU_BOUND);
+	else if (p->se.tt_node.task_type == TT_BATCH)
+		PN_TT(task_type, BATCH);
+#endif
+
 	PN(se.exec_start);
 	PN(se.vruntime);
 	PN(se.sum_exec_runtime);
