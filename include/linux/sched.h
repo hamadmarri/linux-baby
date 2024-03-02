@@ -533,6 +533,11 @@ struct sched_statistics {
 #endif /* CONFIG_SCHEDSTATS */
 } ____cacheline_aligned;
 
+struct bs_node {
+	struct bs_node*                 next;
+	struct bs_node*                 prev;
+};
+
 struct sched_entity {
 	/* For load-balancing: */
 	struct load_weight		load;
@@ -542,6 +547,8 @@ struct sched_entity {
 
 	struct list_head		group_node;
 	unsigned int			on_rq;
+
+	struct bs_node                  bs_node;
 
 	u64				exec_start;
 	u64				sum_exec_runtime;

@@ -596,6 +596,8 @@ struct cfs_rq {
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
 	struct sched_entity	*curr;
+	struct bs_node		*head;
+	struct bs_node		*cursor;
 	struct sched_entity	*next;
 
 #ifdef	CONFIG_SCHED_DEBUG

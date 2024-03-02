@@ -4524,7 +4524,7 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
 	p->se.vlag			= 0;
-	p->se.slice			= sysctl_sched_base_slice;
+	p->se.slice			= 0;
 	INIT_LIST_HEAD(&p->se.group_node);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -9911,6 +9911,8 @@ void __init sched_init(void)
 #endif
 
 	wait_bit_init();
+
+	printk(KERN_INFO "Baby CPU scheduler v6.7 by Hamad Al Marri.");
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	ptr += 2 * nr_cpu_ids * sizeof(void **);
