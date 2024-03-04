@@ -26,7 +26,13 @@ void init_cfs_rq(struct cfs_rq *cfs_rq)
 
 __init void init_sched_fair_class(void) {}
 
-void reweight_task(struct task_struct *p, int prio) {}
+void reweight_task(struct task_struct *p, int prio)
+{
+	struct sched_entity *se = &p->se;
+	struct load_weight *load = &se->load;
+
+	load->inv_weight = sched_prio_to_wmult[prio];
+}
 
 static inline struct sched_entity *se_of(struct bs_node *bsn)
 {

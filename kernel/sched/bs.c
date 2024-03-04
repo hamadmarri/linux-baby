@@ -522,7 +522,7 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 
 		src_rq = cpu_rq(cpu);
 
-		if (src_rq->nr_running < 2)
+		if (src_rq->nr_running <= 1)
 			continue;
 
 		if (src_rq->nr_running > max) {
@@ -537,7 +537,7 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 		rq_lock_irqsave(src_rq, &src_rf);
 		update_rq_clock(src_rq);
 
-		if (src_rq->nr_running < 2) {
+		if (src_rq->nr_running <= 1) {
 			rq_unlock(src_rq, &src_rf);
 			local_irq_restore(src_rf.flags);
 		} else {
@@ -608,13 +608,13 @@ void trigger_load_balance(struct rq *this_rq)
 		}
 	}
 
-	if (min_rq == max_rq || max - min < 2)
+	if (min_rq == max_rq || max - min <= 1)
 		return;
 
 	rq_lock_irqsave(max_rq, &src_rf);
 	update_rq_clock(max_rq);
 
-	if (max_rq->nr_running < 2) {
+	if (max_rq->nr_running <= 1) {
 		rq_unlock(max_rq, &src_rf);
 		local_irq_restore(src_rf.flags);
 		return;
