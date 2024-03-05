@@ -224,7 +224,7 @@ static bool yield_to_task_fair(struct rq *rq, struct task_struct *p)
 	return true;
 }
 
-static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
+static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int wake_flags)
 {
 	struct task_struct *curr = rq->curr;
 	struct sched_entity *se = &curr->se, *pse = &p->se;
@@ -301,6 +301,11 @@ again:
 	p = task_of(se);
 
 done: __maybe_unused;
+	if (hrtick_enabled_fair(rq))
+		hrtick_start_fair(rq, p);
+
+	update_misfit_status(p, rq);
+
 	return p;
 
 idle:
@@ -415,6 +420,9 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 	// TODO: numa:
 	// if (static_branch_unlikely(&sched_numa_balancing))
 	// 	task_tick_numa(rq, curr);
+
+	update_misfit_status(curr, rq);
+	update_overutilized_status(task_rq(curr));
 }
 
 static void task_fork_fair(struct task_struct *p)
@@ -445,7 +453,7 @@ DEFINE_SCHED_CLASS(fair) = {
 	.yield_task		= yield_task_fair,
 	.yield_to_task		= yield_to_task_fair,
 
-	.wakeup_preempt		= check_preempt_wakeup,
+	.wakeup_preempt		= check_preempt_wakeup_fair,
 
 	.pick_next_task		= __pick_next_task_fair,
 	.put_prev_task		= put_prev_task_fair,
