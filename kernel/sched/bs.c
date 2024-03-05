@@ -10,23 +10,23 @@
 #include "sched.h"
 #include "pelt.h"
 // #include "fair_numa.h"
-#include "fair_dep_funcs.h"
+#include "bs.h"
 
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
+	u64 now = rq_clock_task(rq_of(cfs_rq));
 	u64 delta_exec;
 
 	if (unlikely(!curr))
 		return;
 
-	delta_exec = update_curr_se(rq_of(cfs_rq), curr);
+	delta_exec = now - curr->exec_start;
 	if (unlikely((s64)delta_exec <= 0))
 		return;
 
-	curr->vruntime += calc_delta_fair(delta_exec, curr);
-
-	update_curr_task(task_of(curr), delta_exec);
+	curr->exec_start = now;
+	curr->sum_exec_runtime += delta_exec;
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -113,10 +113,6 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	if (!is_curr)
 		__enqueue_entity(cfs_rq, se);
 
-	/* Entity has migrated, no longer consider this task hot */
-	if (flags & ENQUEUE_MIGRATED)
-		se->exec_start = 0;
-
 	se->on_rq = 1;
 }
 
@@ -138,23 +134,6 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	struct sched_entity *se = &p->se;
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 	int idle_h_nr_running = task_has_idle_policy(p);
-	int task_new = !(flags & ENQUEUE_WAKEUP);
-
-	/*
-	 * The code below (indirectly) updates schedutil which looks at
-	 * the cfs_rq utilization to select a frequency.
-	 * Let's add the task's estimated utilization to the cfs_rq's
-	 * estimated utilization, before we update schedutil.
-	 */
-	util_est_enqueue(&rq->cfs, p);
-
-	/*
-	 * If in_iowait is set, the code below may not trigger any cpufreq
-	 * utilization updates, so do it here explicitly with the IOWAIT flag
-	 * passed.
-	 */
-	if (p->in_iowait)
-		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
 	if (!se->on_rq) {
 		enqueue_entity(cfs_rq, se, flags);
@@ -163,21 +142,13 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	add_nr_running(rq, 1);
-
-	if (!task_new)
-		update_overutilized_status(rq);
-
-	hrtick_update(rq);
 }
 
 static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct sched_entity *se = &p->se;
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
-	int task_sleep = flags & DEQUEUE_SLEEP;
 	int idle_h_nr_running = task_has_idle_policy(p);
-
-	util_est_dequeue(&rq->cfs, p);
 
 	dequeue_entity(cfs_rq, se, flags);
 
@@ -185,8 +156,6 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	cfs_rq->idle_h_nr_running -= idle_h_nr_running;
 
 	sub_nr_running(rq, 1);
-	util_est_update(&rq->cfs, p, task_sleep);
-	hrtick_update(rq);
 }
 
 static void yield_task_fair(struct rq *rq)
@@ -200,31 +169,28 @@ static void yield_task_fair(struct rq *rq)
 	if (unlikely(rq->nr_running == 1))
 		return;
 
-	update_rq_clock(rq);
-	/*
-	 * Update run-time statistics of the 'current'.
-	 */
-	update_curr(cfs_rq);
-	/*
-	 * Tell update_rq_clock() that we've just updated,
-	 * so we don't do microscopic update in schedule()
-	 * and double the fastpath cost.
-	 */
-	rq_clock_skip_update(rq);
+	if (curr->policy != SCHED_BATCH) {
+		update_rq_clock(rq);
+		/*
+		 * Update run-time statistics of the 'current'.
+		 */
+		update_curr(cfs_rq);
+		/*
+		 * Tell update_rq_clock() that we've just updated,
+		 * so we don't do microscopic update in schedule()
+		 * and double the fastpath cost.
+		 */
+		rq_clock_skip_update(rq);
+	}
 }
 
 static bool yield_to_task_fair(struct rq *rq, struct task_struct *p)
 {
-	struct sched_entity *se = &p->se;
-
-	if (!se->on_rq)
-		return false;
-
 	yield_task_fair(rq);
 	return true;
 }
 
-static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int wake_flags)
+static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 {
 	struct task_struct *curr = rq->curr;
 	struct sched_entity *se = &curr->se, *pse = &p->se;
@@ -301,10 +267,14 @@ again:
 	p = task_of(se);
 
 done: __maybe_unused;
-	if (hrtick_enabled_fair(rq))
-		hrtick_start_fair(rq, p);
-
-	update_misfit_status(p, rq);
+#ifdef CONFIG_SMP
+	/*
+	 * Move the next running task to the front of
+	 * the list, so our cfs_tasks list becomes MRU
+	 * one.
+	 */
+	list_move(&p->se.group_node, &rq->cfs_tasks);
+#endif
 
 	return p;
 
@@ -390,7 +360,23 @@ static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 	struct sched_entity *se = &p->se;
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 
+#ifdef CONFIG_SMP
+	if (task_on_rq_queued(p)) {
+		/*
+		 * Move the next running task to the front of the list, so our
+		 * cfs_tasks list becomes MRU one.
+		 */
+		list_move(&se->group_node, &rq->cfs_tasks);
+	}
+#endif
+
 	set_next_entity(cfs_rq, se);
+}
+
+static void
+check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+{
+	resched_curr(rq_of(cfs_rq));
 }
 
 static void
@@ -398,22 +384,8 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 {
 	update_curr(cfs_rq);
 
-#ifdef CONFIG_SCHED_HRTICK
-	/*
-	 * queued ticks are scheduled to match the slice, so don't bother
-	 * validating it and just reschedule.
-	 */
-	if (queued) {
-		resched_curr(rq_of(cfs_rq));
-		return;
-	}
-	/*
-	 * don't let the period tick interfere with the hrtick preemption
-	 */
-	if (!sched_feat(DOUBLE_TICK) &&
-			hrtimer_active(&rq_of(cfs_rq)->hrtick_timer))
-		return;
-#endif
+	if (cfs_rq->nr_running > 1)
+		check_preempt_tick(cfs_rq, curr);
 }
 
 #include "balancer.h"
@@ -428,9 +400,6 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 	// TODO: numa:
 	// if (static_branch_unlikely(&sched_numa_balancing))
 	// 	task_tick_numa(rq, curr);
-
-	update_misfit_status(curr, rq);
-	update_overutilized_status(task_rq(curr));
 }
 
 static void task_fork_fair(struct task_struct *p)
@@ -461,7 +430,7 @@ DEFINE_SCHED_CLASS(fair) = {
 	.yield_task		= yield_task_fair,
 	.yield_to_task		= yield_to_task_fair,
 
-	.wakeup_preempt		= check_preempt_wakeup_fair,
+	.wakeup_preempt		= check_preempt_wakeup,
 
 	.pick_next_task		= __pick_next_task_fair,
 	.put_prev_task		= put_prev_task_fair,
@@ -491,73 +460,3 @@ DEFINE_SCHED_CLASS(fair) = {
 
 	.update_curr		= update_curr_fair,
 };
-
-static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
-			    unsigned long weight)
-{
-	bool curr = cfs_rq->curr == se;
-
-	if (se->on_rq) {
-		/* commit outstanding execution time */
-		if (curr)
-			update_curr(cfs_rq);
-		else
-			__dequeue_entity(cfs_rq, se);
-		update_load_sub(&cfs_rq->load, se->load.weight);
-	}
-	dequeue_load_avg(cfs_rq, se);
-
-	update_load_set(&se->load, weight);
-
-#ifdef CONFIG_SMP
-	do {
-		u32 divider = get_pelt_divider(&se->avg);
-
-		se->avg.load_avg = div_u64(se_weight(se) * se->avg.load_sum, divider);
-	} while (0);
-#endif
-
-	enqueue_load_avg(cfs_rq, se);
-	if (se->on_rq) {
-		update_load_add(&cfs_rq->load, se->load.weight);
-		if (!curr)
-			__enqueue_entity(cfs_rq, se);
-	}
-}
-
-void reweight_task(struct task_struct *p, int prio)
-{
-	struct sched_entity *se = &p->se;
-	struct cfs_rq *cfs_rq = cfs_rq_of(se);
-	struct load_weight *load = &se->load;
-	unsigned long weight = scale_load(sched_prio_to_weight[prio]);
-
-	reweight_entity(cfs_rq, se, weight);
-	load->inv_weight = sched_prio_to_wmult[prio];
-}
-
-/* Working cpumask for: load_balance, load_balance_newidle. */
-static DEFINE_PER_CPU(cpumask_var_t, load_balance_mask);
-static DEFINE_PER_CPU(cpumask_var_t, select_rq_mask);
-static DEFINE_PER_CPU(cpumask_var_t, should_we_balance_tmpmask);
-
-__init void init_sched_fair_class(void)
-{
-#ifdef CONFIG_SMP
-	int i;
-
-	for_each_possible_cpu(i) {
-		zalloc_cpumask_var_node(&per_cpu(load_balance_mask, i), GFP_KERNEL, cpu_to_node(i));
-		zalloc_cpumask_var_node(&per_cpu(select_rq_mask,    i), GFP_KERNEL, cpu_to_node(i));
-		zalloc_cpumask_var_node(&per_cpu(should_we_balance_tmpmask, i),
-					GFP_KERNEL, cpu_to_node(i));
-	}
-
-#ifdef CONFIG_NO_HZ_COMMON
-	nohz.next_balance = jiffies;
-	nohz.next_blocked = jiffies;
-	zalloc_cpumask_var(&nohz.idle_cpus_mask, GFP_NOWAIT);
-#endif
-#endif /* SMP */
-
-}
