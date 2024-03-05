@@ -15,18 +15,18 @@
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
-	u64 now = rq_clock_task(rq_of(cfs_rq));
 	u64 delta_exec;
 
 	if (unlikely(!curr))
 		return;
 
-	delta_exec = now - curr->exec_start;
+	delta_exec = update_curr_se(rq_of(cfs_rq), curr);
 	if (unlikely((s64)delta_exec <= 0))
 		return;
 
-	curr->exec_start = now;
-	curr->sum_exec_runtime += delta_exec;
+	curr->vruntime += calc_delta_fair(delta_exec, curr);
+
+	update_curr_task(task_of(curr), delta_exec);
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -113,6 +113,10 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	if (!is_curr)
 		__enqueue_entity(cfs_rq, se);
 
+	/* Entity has migrated, no longer consider this task hot */
+	if (flags & ENQUEUE_MIGRATED)
+		se->exec_start = 0;
+
 	se->on_rq = 1;
 }
 
@@ -134,6 +138,23 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	struct sched_entity *se = &p->se;
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 	int idle_h_nr_running = task_has_idle_policy(p);
+	int task_new = !(flags & ENQUEUE_WAKEUP);
+
+	/*
+	 * The code below (indirectly) updates schedutil which looks at
+	 * the cfs_rq utilization to select a frequency.
+	 * Let's add the task's estimated utilization to the cfs_rq's
+	 * estimated utilization, before we update schedutil.
+	 */
+	util_est_enqueue(&rq->cfs, p);
+
+	/*
+	 * If in_iowait is set, the code below may not trigger any cpufreq
+	 * utilization updates, so do it here explicitly with the IOWAIT flag
+	 * passed.
+	 */
+	if (p->in_iowait)
+		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
 
 	if (!se->on_rq) {
 		enqueue_entity(cfs_rq, se, flags);
@@ -142,13 +163,21 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	}
 
 	add_nr_running(rq, 1);
+
+	if (!task_new)
+		update_overutilized_status(rq);
+
+	hrtick_update(rq);
 }
 
 static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct sched_entity *se = &p->se;
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
+	int task_sleep = flags & DEQUEUE_SLEEP;
 	int idle_h_nr_running = task_has_idle_policy(p);
+
+	util_est_dequeue(&rq->cfs, p);
 
 	dequeue_entity(cfs_rq, se, flags);
 
@@ -156,6 +185,8 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	cfs_rq->idle_h_nr_running -= idle_h_nr_running;
 
 	sub_nr_running(rq, 1);
+	util_est_update(&rq->cfs, p, task_sleep);
+	hrtick_update(rq);
 }
 
 static void yield_task_fair(struct rq *rq)
