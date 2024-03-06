@@ -9,7 +9,7 @@
 #include <linux/sched/nohz.h>
 #include "sched.h"
 #include "pelt.h"
-// #include "fair_numa.h"
+#include "fair_numa.h"
 #include "fair_dep_funcs.h"
 
 static void update_curr(struct cfs_rq *cfs_rq)
