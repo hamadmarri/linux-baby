@@ -404,7 +404,7 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	 * queued ticks are scheduled to match the slice, so don't bother
 	 * validating it and just reschedule.
 	 */
-	if (cfs_rq->nr_running > 1) {
+	if (cfs_rq->nr_running > 1 || queued) {
 		resched_curr(rq_of(cfs_rq));
 		return;
 	}
