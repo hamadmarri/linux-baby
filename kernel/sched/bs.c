@@ -426,9 +426,8 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 
 	entity_tick(cfs_rq, se, queued);
 
-	// TODO: numa:
-	// if (static_branch_unlikely(&sched_numa_balancing))
-	// 	task_tick_numa(rq, curr);
+	if (static_branch_unlikely(&sched_numa_balancing))
+		task_tick_numa(rq, curr);
 
 	update_misfit_status(curr, rq);
 	update_overutilized_status(task_rq(curr));

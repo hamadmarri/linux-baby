@@ -1,4 +1,3 @@
-
 #ifdef CONFIG_NO_HZ_COMMON
 static struct {
 	cpumask_var_t idle_cpus_mask;

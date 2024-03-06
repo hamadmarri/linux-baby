@@ -1,4 +1,3 @@
-
 #ifdef CONFIG_SMP
 static int
 balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)

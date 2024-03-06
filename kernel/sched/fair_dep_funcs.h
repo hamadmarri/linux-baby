@@ -106,7 +106,7 @@ account_entity_enqueue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 #ifdef CONFIG_SMP
 	struct rq *rq = rq_of(cfs_rq);
 
-	// TODO: numa: account_numa_enqueue(rq, task_of(se));
+	account_numa_enqueue(rq, task_of(se));
 	list_add(&se->group_node, &rq->cfs_tasks);
 #endif
 	cfs_rq->nr_running++;
@@ -119,7 +119,7 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	update_load_sub(&cfs_rq->load, se->load.weight);
 #ifdef CONFIG_SMP
-	// TODO: numa: account_numa_dequeue(rq_of(cfs_rq), task_of(se));
+	account_numa_dequeue(rq_of(cfs_rq), task_of(se));
 	list_del_init(&se->group_node);
 #endif
 	cfs_rq->nr_running--;
@@ -131,7 +131,7 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 {
 	struct sched_entity *se = &p->se;
 	se->avg.last_update_time = 0;
-	// TODO: numa: update_scan_period(p, new_cpu);
+	update_scan_period(p, new_cpu);
 }
 
 static void rq_online_fair(struct rq *rq) {}
