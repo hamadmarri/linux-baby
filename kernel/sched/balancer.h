@@ -8,6 +8,20 @@ balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	return newidle_balance(rq, rf) != 0;
 }
 
+/* Runqueue only has SCHED_IDLE tasks enqueued */
+static int sched_idle_rq(struct rq *rq)
+{
+	return unlikely(rq->nr_running == rq->cfs.idle_h_nr_running &&
+			rq->nr_running);
+}
+
+#ifdef CONFIG_SMP
+static int sched_idle_cpu(int cpu)
+{
+	return sched_idle_rq(cpu_rq(cpu));
+}
+#endif
+
 static int
 select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 {
@@ -16,8 +30,16 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 	unsigned int min = rq->nr_running;
 	int cpu, new_cpu = prev_cpu;
 
+	if (sched_idle_cpu(prev_cpu))
+		return prev_cpu;
+
 	for_each_online_cpu(cpu) {
-		if (cpu_rq(cpu)->nr_running < min) {
+
+		if (available_idle_cpu(cpu) || sched_idle_cpu(cpu) || cpu_rq(cpu)->nr_running <= min) {
+
+			if (cpu_rq(cpu)->nr_running == min && !cpus_share_cache(prev_cpu, cpu))
+				continue;
+
 			new_cpu = cpu;
 			min = cpu_rq(cpu)->nr_running;
 		}
@@ -190,7 +212,7 @@ static inline int on_null_domain(struct rq *rq)
 static void rebalance(struct rq *this_rq)
 {
 	int this_cpu = cpu_of(this_rq);
-	int cpu;
+	int cpu, max_cpu, min_cpu;
 	unsigned int max, min;
 	struct rq *max_rq, *min_rq, *c_rq;
 	struct rq_flags src_rf;
@@ -198,27 +220,42 @@ static void rebalance(struct rq *this_rq)
 	if (this_cpu != 0)
 		return;
 
+again:
 	max = min = this_rq->nr_running;
 	max_rq = min_rq = this_rq;
 
+	// find max
 	for_each_online_cpu(cpu) {
 		c_rq = cpu_rq(cpu);
 
-		/*
-		 * Don't need to rebalance while attached to NULL domain or
-		 * runqueue CPU is not active
-		 */
 		if (unlikely(on_null_domain(c_rq) || !cpu_active(cpu)))
 			continue;
-
-		if (c_rq->nr_running < min) {
-			min = c_rq->nr_running;
-			min_rq = c_rq;
-		}
 
 		if (c_rq->nr_running > max) {
 			max = c_rq->nr_running;
 			max_rq = c_rq;
+			max_cpu = cpu;
+		}
+	}
+
+	// find min
+	for_each_online_cpu(cpu) {
+		c_rq = cpu_rq(cpu);
+
+		if (max_cpu == cpu)
+			continue;
+
+		if (unlikely(on_null_domain(c_rq) || !cpu_active(cpu)))
+			continue;
+
+		if (available_idle_cpu(cpu) || sched_idle_cpu(cpu) || c_rq->nr_running <= min) {
+
+			if (c_rq->nr_running == min && !cpus_share_cache(max_cpu, cpu))
+				continue;
+
+			min = c_rq->nr_running;
+			min_rq = c_rq;
+			min_cpu = cpu;
 		}
 	}
 
@@ -234,7 +271,8 @@ static void rebalance(struct rq *this_rq)
 		return;
 	}
 
-	move_task(min_rq, max_rq, &src_rf);
+	if (move_task(min_rq, max_rq, &src_rf))
+		goto again;
 }
 
 void trigger_load_balance(struct rq *this_rq)
