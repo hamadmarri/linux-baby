@@ -34,6 +34,8 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 		return prev_cpu;
 
 	for_each_online_cpu(cpu) {
+		if (!cpumask_test_cpu(cpu, p->cpus_ptr))
+			continue;
 
 		if (available_idle_cpu(cpu) || sched_idle_cpu(cpu) || cpu_rq(cpu)->nr_running <= min) {
 
