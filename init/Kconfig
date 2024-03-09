@@ -802,6 +802,7 @@ menu "Scheduler features"
 
 config UCLAMP_TASK
 	bool "Enable utilization clamping for RT/FAIR tasks"
+	default n
 	depends on CPU_FREQ_GOV_SCHEDUTIL
 	help
 	  This feature enables the scheduler to track the clamped utilization
