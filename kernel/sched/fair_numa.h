@@ -472,6 +472,9 @@ static void numa_promotion_adjust_threshold(struct pglist_data *pgdat,
 	}
 }
 
+/* Restrict the NUMA promotion throughput (MB/s) for each target node. */
+static unsigned int sysctl_numa_balancing_promote_rate_limit = 65536;
+
 bool should_numa_migrate_memory(struct task_struct *p, struct folio *folio,
 				int src_nid, int dst_cpu)
 {
@@ -624,8 +627,25 @@ struct task_numa_env {
 	int best_cpu;
 };
 
-static unsigned long cpu_load(struct rq *rq);
-static unsigned long cpu_runnable(struct rq *rq);
+static inline unsigned long cfs_rq_load_avg(struct cfs_rq *cfs_rq)
+{
+	return cfs_rq->avg.load_avg;
+}
+
+static unsigned long cpu_load(struct rq *rq)
+{
+	return cfs_rq_load_avg(&rq->cfs);
+}
+
+static inline unsigned long cfs_rq_runnable_avg(struct cfs_rq *cfs_rq)
+{
+	return cfs_rq->avg.runnable_avg;
+}
+
+static unsigned long cpu_runnable(struct rq *rq)
+{
+	return cfs_rq_runnable_avg(&rq->cfs);
+}
 
 static inline enum
 numa_type numa_classify(unsigned int imbalance_pct,
@@ -642,6 +662,23 @@ numa_type numa_classify(unsigned int imbalance_pct,
 		return node_has_spare;
 
 	return node_fully_busy;
+}
+
+static inline bool is_core_idle(int cpu)
+{
+#ifdef CONFIG_SCHED_SMT
+	int sibling;
+
+	for_each_cpu(sibling, cpu_smt_mask(cpu)) {
+		if (cpu == sibling)
+			continue;
+
+		if (!idle_cpu(sibling))
+			return false;
+	}
+#endif
+
+	return true;
 }
 
 #ifdef CONFIG_SCHED_SMT
@@ -668,6 +705,11 @@ static inline int numa_idle_core(int idle_core, int cpu)
 	return idle_core;
 }
 #endif
+
+static unsigned long capacity_of(int cpu)
+{
+	return cpu_rq(cpu)->cpu_capacity;
+}
 
 /*
  * Gather all necessary information to make NUMA balancing placement
@@ -788,6 +830,11 @@ static bool load_too_imbalanced(long src_load, long dst_load,
 
 	/* Would this change make things worse? */
 	return (imb > old_imb);
+}
+
+static unsigned long task_h_load(struct task_struct *p)
+{
+	return p->se.avg.load_avg;
 }
 
 /*
@@ -989,6 +1036,31 @@ unlock:
 	rcu_read_unlock();
 
 	return stopsearch;
+}
+
+#define NUMA_IMBALANCE_MIN 2
+
+static inline long
+adjust_numa_imbalance(int imbalance, int dst_running, int imb_numa_nr)
+{
+	/*
+	 * Allow a NUMA imbalance if busy CPUs is less than the maximum
+	 * threshold. Above this threshold, individual tasks may be contending
+	 * for both memory bandwidth and any shared HT resources.  This is an
+	 * approximation as the number of running tasks may not be related to
+	 * the number of busy CPUs due to sched_setaffinity.
+	 */
+	if (dst_running > imb_numa_nr)
+		return imbalance;
+
+	/*
+	 * Allow a small imbalance based on a simple pair of communicating
+	 * tasks that remain local when the destination is lightly loaded.
+	 */
+	if (imbalance <= NUMA_IMBALANCE_MIN)
+		return 0;
+
+	return imbalance;
 }
 
 static void task_numa_find_cpu(struct task_numa_env *env,

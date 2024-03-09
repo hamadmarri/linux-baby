@@ -53,74 +53,203 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 	return new_cpu;
 }
 
-static int
-can_migrate_task(struct task_struct *p, int dst_cpu, struct rq *src_rq)
+static void pull_from(struct task_struct *p, struct lb_env *env)
 {
-	if (task_on_cpu(src_rq, p))
+	struct rq_flags rf;
+
+	// detach task
+	deactivate_task(env->src_rq, p, DEQUEUE_NOCLOCK);
+	set_task_cpu(p, env->dst_cpu);
+
+	// unlock src rq
+	rq_unlock(env->src_rq, env->src_rf);
+
+	// lock this rq
+	rq_lock(env->dst_rq, &rf);
+	update_rq_clock(env->dst_rq);
+
+	activate_task(env->dst_rq, p, ENQUEUE_NOCLOCK);
+	wakeup_preempt(env->dst_rq, p, 0);
+
+	// unlock this rq
+	rq_unlock(env->dst_rq, &rf);
+
+	local_irq_restore(env->src_rf->flags);
+}
+
+/*
+ * Returns 1, if task migration degrades locality
+ * Returns 0, if task migration improves locality i.e migration preferred.
+ * Returns -1, if task migration is not affected by locality.
+ */
+static int migrate_degrades_locality(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+{
+	struct numa_group *numa_group = rcu_dereference(p->numa_group);
+	unsigned long src_weight, dst_weight;
+	int src_nid, dst_nid, dist;
+
+	if (!static_branch_likely(&sched_numa_balancing))
+		return -1;
+
+	if (!p->numa_faults)
+		return -1;
+
+	src_nid = cpu_to_node(cpu_of(src_rq));
+	dst_nid = cpu_to_node(cpu_of(dst_rq));
+
+	if (src_nid == dst_nid)
+		return -1;
+
+	/* Migrating away from the preferred node is always bad. */
+	if (src_nid == p->numa_preferred_nid) {
+		if (src_rq->nr_running > src_rq->nr_preferred_running)
+			return 1;
+		else
+			return -1;
+	}
+
+	/* Encourage migration to the preferred node. */
+	if (dst_nid == p->numa_preferred_nid)
+		return 0;
+
+	/* Leaving a core idle is often worse than degrading locality. */
+	if (sched_idle_cpu(cpu_of(dst_rq)))
+		return -1;
+
+	dist = node_distance(src_nid, dst_nid);
+	if (numa_group) {
+		src_weight = group_weight(p, src_nid, dist);
+		dst_weight = group_weight(p, dst_nid, dist);
+	} else {
+		src_weight = task_weight(p, src_nid, dist);
+		dst_weight = task_weight(p, dst_nid, dist);
+	}
+
+	return dst_weight < src_weight;
+}
+
+#define MIN_HOTNESS 0x7FFFFFFFFFFFFFFLL
+
+static s64 task_hotness(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+{
+	s64 delta;
+
+	lockdep_assert_rq_held(src_rq);
+
+	// TODO: to remove? no need for binary decision here
+	// if (p->sched_class != &fair_sched_class) // && unlikely(!task_has_idle_policy(p)))
+	// 	return MIN_HOTNESS;
+
+	// TODO: why migrating idle task?
+	// if (unlikely(task_has_idle_policy(p)))
+	// 	return MIN_HOTNESS;
+
+	/* SMT siblings share cache */
+	if (cpus_share_cache(cpu_of(dst_rq), cpu_of(src_rq)))
+		return MIN_HOTNESS;
+
+	/*
+	 * TODO: check buddy next
+	 * Buddy candidates are cache hot:
+	 */
+	// if (sched_feat(CACHE_HOT_BUDDY) && dst_rq->nr_running &&
+	//     (&p->se == cfs_rq_of(&p->se)->next))
+	// 	return 1;
+
+	if (sysctl_sched_migration_cost == -1)
+		return 0;
+
+	if (sysctl_sched_migration_cost == 0)
+		return MIN_HOTNESS;
+
+	delta = rq_clock_task(src_rq) - p->se.exec_start;
+
+	return delta;
+}
+
+static s64 hotness_of(struct task_struct *p, struct lb_env *env)
+{
+	int tsk_cache_hot;
+
+	tsk_cache_hot = migrate_degrades_locality(p, env->dst_rq, env->src_rq);
+
+	// 0, if task migration improves locality i.e migration preferred.
+	if (tsk_cache_hot == 0)
+		return MIN_HOTNESS;
+
+	// 1, if task migration degrades locality
+	if (tsk_cache_hot == 1)
+		return 0;
+
+	// -1, if task migration is not affected by locality.
+	return task_hotness(p, env->dst_rq, env->src_rq);
+}
+
+static int
+can_migrate_task(struct task_struct *p, struct lb_env *env)
+{
+	if (task_on_cpu(env->src_rq, p))
 		return 0;
 
 	/* Disregard pcpu kthreads; they are where they need to be. */
 	if (kthread_is_per_cpu(p))
 		return 0;
 
-	if (!cpumask_test_cpu(dst_cpu, p->cpus_ptr))
+	if (!cpumask_test_cpu(env->dst_cpu, p->cpus_ptr))
 		return 0;
 
 	return 1;
 }
 
-static void pull_from(struct rq *this_rq,
-		      struct rq *src_rq,
-		      struct rq_flags *src_rf,
-		      struct task_struct *p)
-{
-	struct rq_flags rf;
-
-	// detach task
-	deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
-	set_task_cpu(p, cpu_of(this_rq));
-
-	// unlock src rq
-	rq_unlock(src_rq, src_rf);
-
-	// lock this rq
-	rq_lock(this_rq, &rf);
-	update_rq_clock(this_rq);
-
-	activate_task(this_rq, p, ENQUEUE_NOCLOCK);
-	wakeup_preempt(this_rq, p, 0);
-
-	// unlock this rq
-	rq_unlock(this_rq, &rf);
-
-	local_irq_restore(src_rf->flags);
-}
-
-static int move_task(struct rq *this_rq, struct rq *src_rq,
+static int move_task(struct rq *dst_rq, struct rq *src_rq,
 			struct rq_flags *src_rf)
 {
 	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
-	struct task_struct *p;
+	struct task_struct *p = NULL, *tsk_itr;
 	struct bs_node *bsn = src_cfs_rq->head;
-	int moved = 0;
+	s64 tsk_coldest = 0, tsk_hotness;
+
+	struct lb_env env = {
+		.dst_cpu	= cpu_of(dst_rq),
+		.dst_rq		= dst_rq,
+		.src_cpu	= cpu_of(src_rq),
+		.src_rq		= src_rq,
+		.src_rf		= src_rf,
+		.idle		= dst_rq->idle_balance ? CPU_IDLE : CPU_NOT_IDLE,
+	};
 
 	while (bsn) {
-		p = task_of(se_of(bsn));
-		if (can_migrate_task(p, cpu_of(this_rq), src_rq)) {
-			pull_from(this_rq, src_rq, src_rf, p);
-			moved = 1;
-			break;
+		tsk_itr = task_of(se_of(bsn));
+
+		if (!can_migrate_task(tsk_itr, &env)) {
+			bsn = bsn->next;
+			continue;
+		}
+
+		tsk_hotness = hotness_of(tsk_itr, &env);
+
+		if (!p) {
+			tsk_coldest = tsk_hotness;
+			p = tsk_itr;
+		} else if (tsk_hotness > tsk_coldest) {
+			// greater value means it is colder
+
+			tsk_coldest = tsk_hotness;
+			p = tsk_itr;
 		}
 
 		bsn = bsn->next;
 	}
 
-	if (!moved) {
+	if (p) {
+		pull_from(p, &env);
+		return 1;
+	} else {
 		rq_unlock(src_rq, src_rf);
 		local_irq_restore(src_rf->flags);
 	}
 
-	return moved;
+	return 0;
 }
 
 static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)

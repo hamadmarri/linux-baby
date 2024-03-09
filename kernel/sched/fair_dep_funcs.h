@@ -513,11 +513,6 @@ static inline void hrtick_update(struct rq *rq)
  */
 #define fits_capacity(cap, max)	((cap) * 1280 < (max) * 1024)
 
-static unsigned long capacity_of(int cpu)
-{
-	return cpu_rq(cpu)->cpu_capacity;
-}
-
 static inline int util_fits_cpu(unsigned long util,
 				unsigned long uclamp_min,
 				unsigned long uclamp_max,
@@ -797,10 +792,6 @@ static inline int task_fits_cpu(struct task_struct *p, int cpu)
 	return (util_fits_cpu(util, uclamp_min, uclamp_max, cpu) > 0);
 }
 
-static unsigned long task_h_load(struct task_struct *p)
-{
-	return p->se.avg.load_avg;
-}
 
 static inline void update_misfit_status(struct task_struct *p, struct rq *rq)
 {

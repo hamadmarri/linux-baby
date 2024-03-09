@@ -7,8 +7,26 @@
 #include <linux/sched/cputime.h>
 #include <linux/sched/isolation.h>
 #include <linux/sched/nohz.h>
+#include <linux/memory-tiers.h>
+#include <linux/mempolicy.h>
+#include <linux/task_work.h>
+
 #include "sched.h"
 #include "pelt.h"
+
+struct lb_env {
+	struct rq		*src_rq;
+	int			src_cpu;
+
+	int			dst_cpu;
+	struct rq		*dst_rq;
+
+	enum cpu_idle_type	idle;
+
+	struct rq_flags		*src_rf;
+	unsigned int		flags;
+};
+
 #include "fair_numa.h"
 #include "fair_dep_funcs.h"
 
