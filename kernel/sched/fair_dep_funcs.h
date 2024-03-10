@@ -1,3 +1,11 @@
+
+#ifdef CONFIG_NO_HZ_FULL
+bool cfs_task_bw_constrained(struct task_struct *p)
+{
+	return false;
+}
+#endif
+
 /*
  * After fork, child runs first. If set to 0 (default) then
  * parent will (try to) run first.
