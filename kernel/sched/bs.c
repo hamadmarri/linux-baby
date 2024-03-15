@@ -28,6 +28,7 @@ struct lb_env {
 };
 
 #include "fair_numa.h"
+#include "fair_debug.h"
 #include "fair_dep_funcs.h"
 
 static void update_curr(struct cfs_rq *cfs_rq)
