@@ -16,7 +16,6 @@ choice
 	 environment leading to NR_CPUS * HZ number of timer interrupts
 	 per second.
 
-
 	config HZ_100
 		bool "100 HZ"
 	help
@@ -40,6 +39,9 @@ choice
 	 on SMP and NUMA systems and exactly dividing by both PAL and
 	 NTSC frame rates for video and multimedia work.
 
+	config HZ_625
+		bool "625 HZ"
+
 	config HZ_1000
 		bool "1000 HZ"
 	help
@@ -53,6 +55,7 @@ config HZ
 	default 100 if HZ_100
 	default 250 if HZ_250
 	default 300 if HZ_300
+	default 625 if HZ_625
 	default 1000 if HZ_1000
 
 config SCHED_HRTICK
