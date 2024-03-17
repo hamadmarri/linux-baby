@@ -56,30 +56,16 @@ static void update_curr_fair(struct rq *rq)
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct bs_node *bsn = &se->bs_node;
-	struct bs_node *prev;
 
-	bsn->next = bsn->prev = NULL;
+	bsn->next = NULL;
 
 	// if empty
 	if (!cfs_rq->head) {
-		cfs_rq->head	= bsn;
-		cfs_rq->cursor	= bsn;
+		cfs_rq->cursor = cfs_rq->head = bsn;
 	}
-	// if cursor == head
-	else if (cfs_rq->cursor == cfs_rq->head) {
-		bsn->next = cfs_rq->head;
-		cfs_rq->head->prev   = bsn;
-		cfs_rq->head         = bsn;
-	}
-	// if cursor != head
 	else {
-		prev = cfs_rq->cursor->prev;
-
-		bsn->next = cfs_rq->cursor;
-		cfs_rq->cursor->prev = bsn;
-
-		prev->next = bsn;
-		bsn->prev  = prev;
+		bsn->next = cfs_rq->head;
+		cfs_rq->head = bsn;
 	}
 }
 
@@ -91,34 +77,53 @@ static inline void rotate_cursor(struct cfs_rq *cfs_rq)
 		cfs_rq->cursor = cfs_rq->head;
 }
 
+static void __dequeue_entity_from_q2(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	struct bs_node *bsn = &se->bs_node;
+	struct bs_node *prev, *itr;
+
+	itr  = cfs_rq->q2_head;
+	prev = NULL;
+
+	while (itr && itr != bsn) {
+		prev = itr;
+		itr = itr->next;
+	}
+
+	if (bsn == cfs_rq->q2_head)
+		// if it is the head
+		cfs_rq->q2_head = cfs_rq->q2_head->next;
+	else
+		prev->next = itr->next;
+}
+
 static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct bs_node *bsn = &se->bs_node;
-	struct bs_node *prev, *next;
+	struct bs_node *prev, *itr;
 
-	// if only one se in rq
-	if (cfs_rq->head->next == NULL) {
-		cfs_rq->head	= NULL;
-		cfs_rq->cursor	= NULL;
-	} else if (bsn == cfs_rq->head) {
-		// if it is the head
-		cfs_rq->head		= cfs_rq->head->next;
-		cfs_rq->head->prev	= NULL;
+	itr  = cfs_rq->head;
+	prev = NULL;
 
-		if (bsn == cfs_rq->cursor)
-			rotate_cursor(cfs_rq);
-	} else {
-		// if in the middle
-		if (bsn == cfs_rq->cursor)
-			rotate_cursor(cfs_rq);
-
-		prev = bsn->prev;
-		next = bsn->next;
-
-		prev->next = next;
-		if (next)
-			next->prev = prev;
+	while (itr && itr != bsn) {
+		prev = itr;
+		itr = itr->next;
 	}
+
+	if (!itr) {
+		// then it is in q2
+		__dequeue_entity_from_q2(cfs_rq, se);
+		return;
+	}
+
+	if (bsn == cfs_rq->head)
+		// if it is the head
+		cfs_rq->head = cfs_rq->head->next;
+	else
+		prev->next = itr->next;
+
+	if (bsn == cfs_rq->cursor)
+		rotate_cursor(cfs_rq);
 }
 
 static void
@@ -290,13 +295,17 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	struct bs_node *bsn = cfs_rq->cursor;
 
-	/*
-	 * need to switch to q2
-	 */
 	if (!bsn) {
-		cfs_rq->head = cfs_rq->q2_head;
-		cfs_rq->q2_head = NULL;
-		bsn = cfs_rq->cursor = cfs_rq->head;
+		if (cfs_rq->head) {
+			bsn = cfs_rq->cursor = cfs_rq->head;
+		} else {
+			/*
+			 * need to switch to q2
+			 */
+			cfs_rq->head = cfs_rq->q2_head;
+			bsn = cfs_rq->cursor = cfs_rq->head;
+			cfs_rq->q2_head = NULL;
+		}
 	}
 
 	// update cursor
@@ -392,17 +401,15 @@ static void __enqueue_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *se
 {
 	struct bs_node *bsn = &se->bs_node;
 
-	bsn->next = bsn->prev = NULL;
+	bsn->next = NULL;
 
 	// if empty
 	if (!cfs_rq->q2_head) {
 		cfs_rq->q2_head	= bsn;
 	}
-	// if cursor == head
 	else {
 		bsn->next = cfs_rq->q2_head;
-		cfs_rq->q2_head->prev   = bsn;
-		cfs_rq->q2_head         = bsn;
+		cfs_rq->q2_head = bsn;
 	}
 }
 

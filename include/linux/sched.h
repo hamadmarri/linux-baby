@@ -535,7 +535,10 @@ struct sched_statistics {
 
 struct bs_node {
 	struct bs_node*                 next;
-	struct bs_node*                 prev;
+	u64				burst;
+	u64				est;
+	u32				alpha;
+
 };
 
 struct sched_entity {
