@@ -290,8 +290,14 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	struct bs_node *bsn = cfs_rq->cursor;
 
-	if (!bsn)
+	/*
+	 * need to switch to q2
+	 */
+	if (!bsn) {
+		cfs_rq->head = cfs_rq->q2_head;
+		cfs_rq->q2_head = NULL;
 		bsn = cfs_rq->cursor = cfs_rq->head;
+	}
 
 	// update cursor
 	rotate_cursor(cfs_rq);
@@ -382,17 +388,34 @@ static struct task_struct *pick_task_fair(struct rq *rq)
 }
 #endif
 
+static void __enqueue_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	struct bs_node *bsn = &se->bs_node;
+
+	bsn->next = bsn->prev = NULL;
+
+	// if empty
+	if (!cfs_rq->q2_head) {
+		cfs_rq->q2_head	= bsn;
+	}
+	// if cursor == head
+	else {
+		bsn->next = cfs_rq->q2_head;
+		cfs_rq->q2_head->prev   = bsn;
+		cfs_rq->q2_head         = bsn;
+	}
+}
+
 static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 {
 	/*
 	 * If still on the runqueue then deactivate_task()
 	 * was not called and update_curr() has to be done:
 	 */
-	if (prev->on_rq)
+	if (prev->on_rq) {
 		update_curr(cfs_rq);
-
-	if (prev->on_rq)
-		__enqueue_entity(cfs_rq, prev);
+		__enqueue_prev_entity(cfs_rq, prev);
+	}
 
 	cfs_rq->curr = NULL;
 }

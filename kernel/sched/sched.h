@@ -597,6 +597,7 @@ struct cfs_rq {
 	 */
 	struct sched_entity	*curr;
 	struct bs_node		*head;
+	struct bs_node		*q2_head;
 	struct bs_node		*cursor;
 	struct sched_entity	*next;
 
