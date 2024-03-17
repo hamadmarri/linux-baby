@@ -31,6 +31,10 @@ struct lb_env {
 #include "fair_debug.h"
 #include "fair_dep_funcs.h"
 
+
+// 9.6ms
+unsigned int shared_quota = 9600000ULL;
+
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
@@ -240,6 +244,28 @@ static bool yield_to_task_fair(struct rq *rq, struct task_struct *p)
 	return true;
 }
 
+static int entity_end_quota(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+{
+	unsigned int n = cfs_rq->nr_running;
+	unsigned int quota;
+	struct bs_node *bs = &curr->bs_node;
+	s64 vburst;
+
+	if (n == 0)
+		return 1;
+
+	if (n == 1)
+		return 0;
+
+	quota = shared_quota / n;
+	vburst = curr->vruntime - bs->vruntime_start;
+
+	if (vburst < 0)
+		printk(KERN_INFO "vburst < 0");
+
+	return vburst >= (s64)quota;
+}
+
 static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int wake_flags)
 {
 	struct task_struct *curr = rq->curr;
@@ -267,6 +293,12 @@ static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int 
 
 	// TODO: if pick_next != curr
 	// 	 	goto preempt;
+
+	if (entity_end_quota(cfs_rq_of(se), se))
+		goto preempt;
+
+	return;
+
 preempt:
 	resched_curr(rq);
 }
@@ -278,6 +310,7 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		__dequeue_entity(cfs_rq, se);
 
 	se->exec_start = rq_clock_task(rq_of(cfs_rq));
+	se->bs_node.vruntime_start = se->vruntime;
 	cfs_rq->curr = se;
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
 }
@@ -437,10 +470,11 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	 * queued ticks are scheduled to match the slice, so don't bother
 	 * validating it and just reschedule.
 	 */
-	if (cfs_rq->nr_running > 1 || queued) {
+	if (queued || entity_end_quota(cfs_rq, curr)) {
 		resched_curr(rq_of(cfs_rq));
 		return;
 	}
+
 	/*
 	 * don't let the period tick interfere with the hrtick preemption
 	 */

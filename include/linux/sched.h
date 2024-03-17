@@ -535,6 +535,7 @@ struct sched_statistics {
 
 struct bs_node {
 	struct bs_node*                 next;
+	u64				vruntime_start;
 	u64				burst;
 	u64				est;
 	u32				alpha;
