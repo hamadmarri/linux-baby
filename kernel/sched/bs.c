@@ -57,16 +57,8 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct bs_node *bsn = &se->bs_node;
 
-	bsn->next = NULL;
-
-	// if empty
-	if (!cfs_rq->head) {
-		cfs_rq->cursor = cfs_rq->head = bsn;
-	}
-	else {
-		bsn->next = cfs_rq->head;
-		cfs_rq->head = bsn;
-	}
+	bsn->next = cfs_rq->head;
+	cfs_rq->head = bsn;
 }
 
 static inline void rotate_cursor(struct cfs_rq *cfs_rq)
@@ -401,16 +393,8 @@ static void __enqueue_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *se
 {
 	struct bs_node *bsn = &se->bs_node;
 
-	bsn->next = NULL;
-
-	// if empty
-	if (!cfs_rq->q2_head) {
-		cfs_rq->q2_head	= bsn;
-	}
-	else {
-		bsn->next = cfs_rq->q2_head;
-		cfs_rq->q2_head = bsn;
-	}
+	bsn->next = cfs_rq->q2_head;
+	cfs_rq->q2_head = bsn;
 }
 
 static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
