@@ -4687,6 +4687,13 @@ static int sysctl_schedstats(struct ctl_table *table, int write, void *buffer,
 
 #ifdef CONFIG_SYSCTL
 static struct ctl_table sched_core_sysctls[] = {
+	{
+		.procname	= "sched_bs_shared_quota",
+		.data		= &bs_shared_quota,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
 #ifdef CONFIG_SCHEDSTATS
 	{
 		.procname       = "sched_schedstats",

@@ -31,9 +31,7 @@ struct lb_env {
 #include "fair_debug.h"
 #include "fair_dep_funcs.h"
 
-
-// 9.6ms
-unsigned int shared_quota = 9600000ULL;
+unsigned int bs_shared_quota = 9600000ULL; // 9.6ms
 
 static void update_curr(struct cfs_rq *cfs_rq)
 {
@@ -57,10 +55,8 @@ static void update_curr_fair(struct rq *rq)
 	update_curr(cfs_rq_of(&rq->curr->se));
 }
 
-static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static void __enqueue_entity(struct cfs_rq *cfs_rq, struct bs_node *bsn)
 {
-	struct bs_node *bsn = &se->bs_node;
-
 	bsn->next = cfs_rq->head;
 	cfs_rq->head = bsn;
 }
@@ -73,9 +69,8 @@ static inline void rotate_cursor(struct cfs_rq *cfs_rq)
 		cfs_rq->cursor = cfs_rq->head;
 }
 
-static void __dequeue_entity_from_q2(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static void __dequeue_entity_from_q2(struct cfs_rq *cfs_rq, struct bs_node *bsn)
 {
-	struct bs_node *bsn = &se->bs_node;
 	struct bs_node *prev, *itr;
 
 	itr  = cfs_rq->q2_head;
@@ -93,9 +88,8 @@ static void __dequeue_entity_from_q2(struct cfs_rq *cfs_rq, struct sched_entity 
 		prev->next = itr->next;
 }
 
-static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static void __dequeue_entity(struct cfs_rq *cfs_rq, struct bs_node *bsn)
 {
-	struct bs_node *bsn = &se->bs_node;
 	struct bs_node *prev, *itr;
 
 	itr  = cfs_rq->head;
@@ -108,7 +102,7 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 	if (!itr) {
 		// then it is in q2
-		__dequeue_entity_from_q2(cfs_rq, se);
+		__dequeue_entity_from_q2(cfs_rq, bsn);
 		return;
 	}
 
@@ -131,7 +125,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	account_entity_enqueue(cfs_rq, se);
 
 	if (!is_curr)
-		__enqueue_entity(cfs_rq, se);
+		__enqueue_entity(cfs_rq, &se->bs_node);
 
 	/* Entity has migrated, no longer consider this task hot */
 	if (flags & ENQUEUE_MIGRATED)
@@ -146,7 +140,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	update_curr(cfs_rq);
 
 	if (se != cfs_rq->curr)
-		__dequeue_entity(cfs_rq, se);
+		__dequeue_entity(cfs_rq, &se->bs_node);
 
 	se->on_rq = 0;
 	account_entity_dequeue(cfs_rq, se);
@@ -257,7 +251,7 @@ static int entity_end_quota(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	if (n == 1)
 		return 0;
 
-	quota = shared_quota / n;
+	quota = bs_shared_quota / n;
 	vburst = curr->vruntime - bs->vruntime_start;
 
 	if (vburst < 0)
@@ -307,7 +301,7 @@ static void
 set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	if (se->on_rq)
-		__dequeue_entity(cfs_rq, se);
+		__dequeue_entity(cfs_rq, &se->bs_node);
 
 	se->exec_start = rq_clock_task(rq_of(cfs_rq));
 	se->bs_node.vruntime_start = se->vruntime;
@@ -315,22 +309,32 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
 }
 
-static struct sched_entity *
-pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+static struct bs_node* switch_to_q2(struct cfs_rq *cfs_rq)
+{
+	struct bs_node *itr = cfs_rq->q2_head;
+
+	while (itr) {
+		__dequeue_entity_from_q2(cfs_rq, itr);
+		__enqueue_entity(cfs_rq, itr);
+		itr = cfs_rq->q2_head;
+	}
+
+	// set the cursor at the beginning
+	cfs_rq->cursor = cfs_rq->head;
+
+	return cfs_rq->head;
+}
+
+static struct sched_entity* pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	struct bs_node *bsn = cfs_rq->cursor;
 
 	if (!bsn) {
-		if (cfs_rq->head) {
+		if (cfs_rq->head)
 			bsn = cfs_rq->cursor = cfs_rq->head;
-		} else {
-			/*
-			 * need to switch to q2
-			 */
-			cfs_rq->head = cfs_rq->q2_head;
-			bsn = cfs_rq->cursor = cfs_rq->head;
-			cfs_rq->q2_head = NULL;
-		}
+		else
+			// need to switch to q2
+			bsn = switch_to_q2(cfs_rq);
 	}
 
 	// update cursor
@@ -569,7 +573,7 @@ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 		if (curr)
 			update_curr(cfs_rq);
 		else
-			__dequeue_entity(cfs_rq, se);
+			__dequeue_entity(cfs_rq, &se->bs_node);
 		update_load_sub(&cfs_rq->load, se->load.weight);
 	}
 	dequeue_load_avg(cfs_rq, se);
@@ -588,7 +592,7 @@ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 	if (se->on_rq) {
 		update_load_add(&cfs_rq->load, se->load.weight);
 		if (!curr)
-			__enqueue_entity(cfs_rq, se);
+			__enqueue_entity(cfs_rq, &se->bs_node);
 	}
 }
 

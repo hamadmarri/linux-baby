@@ -109,6 +109,8 @@ extern int sysctl_sched_rt_period;
 extern int sysctl_sched_rt_runtime;
 extern int sched_rr_timeslice;
 
+extern unsigned int bs_shared_quota;
+
 /*
  * Helpers for converting nanosecond timing to jiffy resolution
  */
