@@ -31,7 +31,7 @@ struct lb_env {
 #include "fair_debug.h"
 #include "fair_dep_funcs.h"
 
-unsigned int bs_shared_quota = 9600000ULL; // 9.6ms
+unsigned int bs_shared_quota = 6600000ULL; // 6.6ms
 
 static void update_curr(struct cfs_rq *cfs_rq)
 {
@@ -47,8 +47,10 @@ static void update_curr(struct cfs_rq *cfs_rq)
 
 	calc = calc_delta_fair(delta_exec, curr);
 	curr->vruntime		+= calc;
-	curr->bs_node.burst	+= calc;
-
+	curr->bs_node.vburst	+= calc;
+#ifdef CONFIG_SCHED_DEBUG
+	curr->bs_node.prev_vburst = curr->bs_node.vburst;
+#endif
 	update_curr_task(task_of(curr), delta_exec);
 }
 
@@ -107,19 +109,42 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct bs_node *bsn)
 		prev->next = itr->next;
 }
 
+// static u32
+// update_alpha(struct bs_node *bsn, u64 vburst, u64 prev_est, u32 prev_alpha)
+// {
+// 	u32 new_alpha;
+// 	u64 error_part;
+//
+// 	if (vburst == 0)
+// 		return prev_alpha;
+//
+// 	// 0.15 * <prev alpha> + 0.15 * MIN(1, error / <prev burst>)
+// 	new_alpha = (150 * prev_alpha) / 1000;
+//
+// 	error_part = abs((s64)(vburst - prev_est)) * 1000;
+// 	error_part = min(1000, error_part / vburst);
+// 	error_part = (150 * error_part) / 1000;
+//
+// 	bsn->alpha = new_alpha + (u32)error_part;
+//
+// 	return bsn->alpha ;
+// }
+
 static void
 update_est_entity(struct sched_entity *se)
 {
 	struct bs_node *bsn = &se->bs_node;
-	u64 burst	= bsn->burst;
+	u64 vburst	= bsn->vburst;
 	u64 prev_est	= bsn->est;
 	u32 alpha	= bsn->alpha;
 	u64 next_est;
 
+	// alpha = update_alpha(bsn, vburst, prev_est, alpha);
+
 	/*
 	 * <alpha> * <prev burst> + (1 - <alpha>) * <prev estimated>
 	 */
-	next_est = (alpha * burst) + ((1000 - alpha) * prev_est);
+	next_est = (alpha * vburst) + ((1000 - alpha) * prev_est);
 	next_est /= 1000;
 
 	bsn->est = next_est;
@@ -154,7 +179,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	update_est_entity(se);
 
 	if (flags & DEQUEUE_SLEEP)
-		se->bs_node.burst = 0;
+		se->bs_node.vburst = 0;
 
 	if (se != cfs_rq->curr)
 		__dequeue_entity(cfs_rq, &se->bs_node);
@@ -481,8 +506,12 @@ static void __enqueue_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *se
 {
 	struct bs_node *bsn = &se->bs_node;
 
-	bsn->next = cfs_rq->q2_head;
-	cfs_rq->q2_head = bsn;
+	if (entity_end_quota(cfs_rq, se)) {
+		bsn->next = cfs_rq->q2_head;
+		cfs_rq->q2_head = bsn;
+	} else {
+		__enqueue_entity(cfs_rq, &se->bs_node);
+	}
 }
 
 static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
