@@ -19,11 +19,6 @@ struct sched_entity *__pick_root_entity(struct cfs_rq *cfs_rq)
 	return NULL;
 }
 
-struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
-{
-	return NULL;
-}
-
 struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
 {
 	return NULL;

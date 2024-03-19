@@ -36,7 +36,7 @@ unsigned int bs_shared_quota = 9600000ULL; // 9.6ms
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
-	u64 delta_exec;
+	u64 delta_exec, calc;
 
 	if (unlikely(!curr))
 		return;
@@ -45,7 +45,9 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	if (unlikely((s64)delta_exec <= 0))
 		return;
 
-	curr->vruntime += calc_delta_fair(delta_exec, curr);
+	calc = calc_delta_fair(delta_exec, curr);
+	curr->vruntime		+= calc;
+	curr->bs_node.burst	+= calc;
 
 	update_curr_task(task_of(curr), delta_exec);
 }
@@ -59,14 +61,6 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct bs_node *bsn)
 {
 	bsn->next = cfs_rq->head;
 	cfs_rq->head = bsn;
-}
-
-static inline void rotate_cursor(struct cfs_rq *cfs_rq)
-{
-	cfs_rq->cursor = cfs_rq->cursor->next;
-
-	if (!cfs_rq->cursor)
-		cfs_rq->cursor = cfs_rq->head;
 }
 
 static void __dequeue_entity_from_q2(struct cfs_rq *cfs_rq, struct bs_node *bsn)
@@ -111,18 +105,37 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct bs_node *bsn)
 		cfs_rq->head = cfs_rq->head->next;
 	else
 		prev->next = itr->next;
+}
 
-	if (bsn == cfs_rq->cursor)
-		rotate_cursor(cfs_rq);
+static void
+update_est_entity(struct sched_entity *se)
+{
+	struct bs_node *bsn = &se->bs_node;
+	u64 burst	= bsn->burst;
+	u64 prev_est	= bsn->est;
+	u32 alpha	= bsn->alpha;
+	u64 next_est;
+
+	/*
+	 * <alpha> * <prev burst> + (1 - <alpha>) * <prev estimated>
+	 */
+	next_est = (alpha * burst) + ((1000 - alpha) * prev_est);
+	next_est /= 1000;
+
+	bsn->est = next_est;
 }
 
 static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	bool is_curr = cfs_rq->curr == se;
+	bool wakeup = (flags & ENQUEUE_WAKEUP);
 
 	update_curr(cfs_rq);
 	account_entity_enqueue(cfs_rq, se);
+
+	if (!wakeup)
+		update_est_entity(se);
 
 	if (!is_curr)
 		__enqueue_entity(cfs_rq, &se->bs_node);
@@ -138,6 +151,10 @@ static void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	update_curr(cfs_rq);
+	update_est_entity(se);
+
+	if (flags & DEQUEUE_SLEEP)
+		se->bs_node.burst = 0;
 
 	if (se != cfs_rq->curr)
 		__dequeue_entity(cfs_rq, &se->bs_node);
@@ -254,10 +271,15 @@ static int entity_end_quota(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	quota = bs_shared_quota / n;
 	vburst = curr->vruntime - bs->vruntime_start;
 
-	if (vburst < 0)
-		printk(KERN_INFO "vburst < 0");
-
 	return vburst >= (s64)quota;
+}
+
+/**
+ * Should `a` preempts `b`?
+ */
+static inline bool entity_before(struct bs_node *a, struct bs_node *b)
+{
+	return (s64)(a->est - b->est) < 0;
 }
 
 static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int wake_flags)
@@ -285,10 +307,7 @@ static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int 
 
 	update_curr(cfs_rq_of(se));
 
-	// TODO: if pick_next != curr
-	// 	 	goto preempt;
-
-	if (entity_end_quota(cfs_rq_of(se), se))
+	if (entity_before(&pse->bs_node, &se->bs_node))
 		goto preempt;
 
 	return;
@@ -309,38 +328,70 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	se->prev_sum_exec_runtime = se->sum_exec_runtime;
 }
 
-static struct bs_node* switch_to_q2(struct cfs_rq *cfs_rq)
+struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
 {
-	struct bs_node *itr = cfs_rq->q2_head;
+	struct bs_node *bsn = cfs_rq->head;
+	struct bs_node *next;
 
-	while (itr) {
-		__dequeue_entity_from_q2(cfs_rq, itr);
-		__enqueue_entity(cfs_rq, itr);
-		itr = cfs_rq->q2_head;
+	if (!cfs_rq->head)
+		return NULL;
+
+	next = bsn->next;
+	while (next) {
+		if (entity_before(next, bsn))
+			bsn = next;
+
+		next = next->next;
 	}
 
-	// set the cursor at the beginning
-	cfs_rq->cursor = cfs_rq->head;
+	return se_of(bsn);
+}
 
-	return cfs_rq->head;
+static struct sched_entity *__pick_next_entity(struct cfs_rq *cfs_rq)
+{
+	struct bs_node *bsn_min = cfs_rq->head;
+	struct bs_node *bs_curr = &cfs_rq->curr->bs_node;
+	struct bs_node *next;
+
+	/*
+	 * Here we avoid picking curr
+	 * while __pick_first_entity picks the
+	 * min since curr == NULL
+	 */
+	if (bsn_min == bs_curr) {
+		bsn_min = bsn_min->next;
+
+		if (!bsn_min)
+			return NULL;
+	}
+
+	next = bsn_min->next;
+
+	while (next) {
+		if (next != bs_curr && entity_before(next, bsn_min))
+			bsn_min = next;
+
+		next = next->next;
+	}
+
+	return se_of(bsn_min);
 }
 
 static struct sched_entity* pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	struct bs_node *bsn = cfs_rq->cursor;
-
-	if (!bsn) {
-		if (cfs_rq->head)
-			bsn = cfs_rq->cursor = cfs_rq->head;
-		else
-			// need to switch to q2
-			bsn = switch_to_q2(cfs_rq);
+	if (!cfs_rq->head) {
+		// need to switch to q2
+		cfs_rq->head = cfs_rq->q2_head;
+		cfs_rq->q2_head = NULL;
 	}
 
-	// update cursor
-	rotate_cursor(cfs_rq);
+	if (!cfs_rq->head)
+		return NULL;
 
-	return se_of(bsn);
+	if (!cfs_rq->curr)
+		return __pick_first_entity(cfs_rq);
+
+	return __pick_next_entity(cfs_rq);
 }
 
 struct task_struct *
@@ -444,6 +495,8 @@ static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 		update_curr(cfs_rq);
 		__enqueue_prev_entity(cfs_rq, prev);
 	}
+
+	update_est_entity(prev);
 
 	cfs_rq->curr = NULL;
 }
@@ -568,6 +621,7 @@ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 {
 	bool curr = cfs_rq->curr == se;
 
+	// TODO: no need to dequeue and enqueu since no order queue
 	if (se->on_rq) {
 		/* commit outstanding execution time */
 		if (curr)
