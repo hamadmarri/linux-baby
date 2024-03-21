@@ -4497,7 +4497,12 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
 	p->se.vlag			= 0;
-	p->se.slice			= sysctl_sched_base_slice;
+	p->se.slice			= 0;
+
+	p->se.bs_node.vburst		= 0;
+	p->se.bs_node.est		= (u64)bs_shared_quota;
+	p->se.bs_node.alpha		= 500U;
+
 	INIT_LIST_HEAD(&p->se.group_node);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -4663,6 +4668,13 @@ static int sysctl_schedstats(struct ctl_table *table, int write, void *buffer,
 
 #ifdef CONFIG_SYSCTL
 static struct ctl_table sched_core_sysctls[] = {
+	{
+		.procname	= "sched_bs_shared_quota",
+		.data		= &bs_shared_quota,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
 #ifdef CONFIG_SCHEDSTATS
 	{
 		.procname       = "sched_schedstats",
@@ -9886,6 +9898,8 @@ void __init sched_init(void)
 #endif
 
 	wait_bit_init();
+
+	printk(KERN_INFO "Baby CPU scheduler v6.7 by Hamad Al Marri.");
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	ptr += 2 * nr_cpu_ids * sizeof(void **);
