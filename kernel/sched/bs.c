@@ -16,6 +16,7 @@
 
 unsigned int sysctl_sched_base_slice	= 7000ULL;
 unsigned int bs_shared_quota		= 6600000ULL; // 6.6ms
+u32 alpha				= 500U;
 
 struct lb_env {
 	struct rq		*src_rq;
@@ -39,7 +40,7 @@ struct global_candidate {
 	raw_spinlock_t lock;
 };
 
-#define MAX_EST		0xFFFFFFFFFFFFFFFULL
+#define MAX_EST 0xFFFFFFFFFFFFFFFULL
 
 struct global_candidate global_candidate = {0, 0, MAX_EST};
 
@@ -161,8 +162,10 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	schedstat_add(cfs_rq->exec_clock, delta_exec);
 
 	calc = calc_delta_fair(delta_exec, curr);
-	curr->vruntime		+= calc;
-	curr->bs_node.vburst	+= calc;
+	curr->vruntime			+= calc;
+	curr->bs_node.vburst		+= calc;
+	curr->bs_node.c_vrt_start	+= calc;
+	curr->bs_node.r_vrt_start	+= calc;
 #ifdef CONFIG_SCHED_DEBUG
 	curr->bs_node.prev_vburst = curr->bs_node.vburst;
 #endif
@@ -182,6 +185,14 @@ static void update_curr(struct cfs_rq *cfs_rq)
 static void update_curr_fair(struct rq *rq)
 {
 	update_curr(cfs_rq_of(&rq->curr->se));
+}
+
+/**
+ * Should `a` preempts `b`?
+ */
+static inline bool entity_before(struct bs_node *a, struct bs_node *b)
+{
+	return (s64)(a->est - b->est) < 0;
 }
 
 static void __enqueue_entity(struct bs_node **q, struct bs_node *bsn)
@@ -274,7 +285,6 @@ update_est_entity(struct sched_entity *se)
 	struct bs_node *bsn = &se->bs_node;
 	u64 vburst	= bsn->vburst;
 	u64 prev_est	= bsn->est;
-	u32 alpha	= bsn->alpha;
 	u64 next_est;
 
 	// alpha = update_alpha(bsn, vburst, prev_est, alpha);
@@ -359,6 +369,8 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		cfs_rq->idle_h_nr_running += idle_h_nr_running;
 	}
 
+	se->bs_node.r_vrt_start = 0;
+
 	update_candidate(cfs_rq);
 
 	add_nr_running(rq, 1);
@@ -431,12 +443,10 @@ int __entity_end_quota(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	unsigned int n = max(cfs_rq->nr_running, 1);
 	unsigned int quota;
 	struct bs_node *bs = &curr->bs_node;
-	s64 vburst;
 
 	quota = max(bs_shared_quota / n, sysctl_sched_base_slice);
-	vburst = curr->vruntime - bs->vruntime_start;
 
-	return vburst >= (s64)quota;
+	return (s64)(bs->r_vrt_start - (u64)quota) >= 0;
 }
 
 static int entity_end_quota(struct cfs_rq *cfs_rq, struct sched_entity *curr)
@@ -452,11 +462,8 @@ static int entity_end_quota(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 static int entity_end_min_slice(struct sched_entity *curr)
 {
 	struct bs_node *bs = &curr->bs_node;
-	s64 vburst;
 
-	vburst = curr->vruntime - bs->vruntime_start;
-
-	return (vburst - (s64)sysctl_sched_base_slice) >= 0;
+	return (s64)(bs->c_vrt_start - (u64)sysctl_sched_base_slice) >= 0;
 }
 
 static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int wake_flags)
@@ -510,7 +517,8 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 	se->exec_start = rq_clock_task(rq_of(cfs_rq));
 
-	se->bs_node.vruntime_start = se->vruntime;
+	se->bs_node.c_vrt_start = 0;
+
 	update_candidate(cfs_rq);
 	cfs_rq->local_cand_est = se->bs_node.est;
 
@@ -665,6 +673,8 @@ static void __enqueue_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *se
 {
 	if (se->yielded || entity_end_quota(cfs_rq, se)) {
 		se->yielded = false;
+		se->bs_node.r_vrt_start = 0;
+
 		__enqueue_entity(&cfs_rq->q2_head, &se->bs_node);
 	} else {
 		__enqueue_entity(&cfs_rq->head, &se->bs_node);
