@@ -413,6 +413,10 @@ static void yield_task_fair(struct rq *rq)
 	if (unlikely(rq->nr_running == 1))
 		return;
 
+	printk(KERN_INFO "yield_task_fair");
+
+	curr->se.yielded = true;
+
 	update_rq_clock(rq);
 	/*
 	 * Update run-time statistics of the 'current'.
@@ -651,10 +655,12 @@ static struct task_struct *pick_task_fair(struct rq *rq)
 
 static void __enqueue_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	if (entity_end_quota(cfs_rq, se))
+	if (se->yielded || entity_end_quota(cfs_rq, se)) {
+		se->yielded = false;
 		__enqueue_entity(&cfs_rq->q2_head, &se->bs_node);
-	else
+	} else {
 		__enqueue_entity(&cfs_rq->head, &se->bs_node);
+	}
 }
 
 static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
@@ -710,7 +716,7 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 		clear_rq_candidate(cfs_rq);
 
 	if (cfs_rq->nr_running > 1) {
-		if (entity_end_quota(cfs_rq, curr)) {
+		if (curr->yielded || entity_end_quota(cfs_rq, curr)) {
 			resched_curr(rq_of(cfs_rq));
 			return;
 		}
