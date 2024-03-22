@@ -1,4 +1,4 @@
-#! /usr/bin/env perl
+#!/usr/bin/perl
 # SPDX-License-Identifier: GPL-2.0
 #
 # checkversion finds uses of all macros in <linux/version.h>

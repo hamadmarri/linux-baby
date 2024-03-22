@@ -244,10 +244,7 @@ static int cs42l43_spi_probe(struct platform_device *pdev)
 	priv->ctlr->use_gpio_descriptors = true;
 	priv->ctlr->auto_runtime_pm = true;
 
-	ret = devm_pm_runtime_enable(priv->dev);
-	if (ret)
-		return ret;
-
+	devm_pm_runtime_enable(priv->dev);
 	pm_runtime_idle(priv->dev);
 
 	regmap_write(priv->regmap, CS42L43_TRAN_CONFIG6, CS42L43_FIFO_SIZE - 1);

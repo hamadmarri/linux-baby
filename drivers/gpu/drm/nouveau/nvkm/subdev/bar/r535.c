@@ -168,11 +168,12 @@ r535_bar_new_(const struct nvkm_bar_func *hw, struct nvkm_device *device,
 	rm->flush = r535_bar_flush;
 
 	ret = gf100_bar_new_(rm, device, type, inst, &bar);
+	*pbar = bar;
 	if (ret) {
-		kfree(rm);
+		if (!bar)
+			kfree(rm);
 		return ret;
 	}
-	*pbar = bar;
 
 	bar->flushBAR2PhysMode = ioremap(device->func->resource_addr(device, 3), PAGE_SIZE);
 	if (!bar->flushBAR2PhysMode)

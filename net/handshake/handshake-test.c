@@ -471,10 +471,7 @@ static void handshake_req_destroy_test1(struct kunit *test)
 	handshake_req_cancel(sock->sk);
 
 	/* Act */
-	/* Ensure the close/release/put process has run to
-	 * completion before checking the result.
-	 */
-	__fput_sync(filp);
+	fput(filp);
 
 	/* Assert */
 	KUNIT_EXPECT_PTR_EQ(test, handshake_req_destroy_test, req);

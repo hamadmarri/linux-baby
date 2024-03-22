@@ -34,10 +34,10 @@ static int pn_ioctl(struct sock *sk, int cmd, int *karg)
 
 	switch (cmd) {
 	case SIOCINQ:
-		spin_lock_bh(&sk->sk_receive_queue.lock);
+		lock_sock(sk);
 		skb = skb_peek(&sk->sk_receive_queue);
 		*karg = skb ? skb->len : 0;
-		spin_unlock_bh(&sk->sk_receive_queue.lock);
+		release_sock(sk);
 		return 0;
 
 	case SIOCPNADDRESOURCE:

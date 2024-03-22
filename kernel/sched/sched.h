@@ -109,8 +109,6 @@ extern int sysctl_sched_rt_period;
 extern int sysctl_sched_rt_runtime;
 extern int sched_rr_timeslice;
 
-extern unsigned int bs_shared_quota;
-
 /*
  * Helpers for converting nanosecond timing to jiffy resolution
  */
@@ -540,7 +538,7 @@ struct cfs_rq {
 	unsigned int		h_nr_running;      /* SCHED_{NORMAL,BATCH,IDLE} */
 	unsigned int		idle_nr_running;   /* SCHED_IDLE */
 	unsigned int		idle_h_nr_running; /* SCHED_IDLE */
-	u64			local_cand_est;
+
 	s64			avg_vruntime;
 	u64			avg_load;
 
@@ -562,8 +560,6 @@ struct cfs_rq {
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
 	struct sched_entity	*curr;
-	struct bs_node		*head;
-	struct bs_node		*q2_head;
 	struct sched_entity	*next;
 
 #ifdef	CONFIG_SCHED_DEBUG
@@ -1859,7 +1855,6 @@ DECLARE_PER_CPU(struct sched_domain_shared __rcu *, sd_llc_shared);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_numa);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_packing);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
-DECLARE_PER_CPU(int, nr_lat_sensitive);
 extern struct static_key_false sched_asym_cpucapacity;
 extern struct static_key_false sched_cluster_active;
 
@@ -2509,9 +2504,6 @@ extern void wakeup_preempt(struct rq *rq, struct task_struct *p, int flags);
 #else
 #define SCHED_NR_MIGRATE_BREAK 32
 #endif
-
-extern inline void inc_nr_lat_sensitive(unsigned int cpu, struct task_struct *p);
-extern inline void dec_nr_lat_sensitive(unsigned int cpu);
 
 extern const_debug unsigned int sysctl_sched_nr_migrate;
 extern const_debug unsigned int sysctl_sched_migration_cost;

@@ -109,7 +109,7 @@ class KernelFeat(Directive):
             else:
                 out_lines += line + "\n"
 
-        nodeList = self.nestedParse(out_lines, self.arguments[0])
+        nodeList = self.nestedParse(out_lines, fname)
         return nodeList
 
     def nestedParse(self, lines, fname):

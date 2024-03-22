@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl
 # SPDX-License-Identifier: GPL-2.0
 
 # This code is taken from the OpenSSL project but the author (Andy Polyakov)

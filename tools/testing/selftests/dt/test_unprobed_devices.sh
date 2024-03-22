@@ -33,8 +33,8 @@ if [[ ! -d "${PDT}" ]]; then
 fi
 
 nodes_compatible=$(
-	for node in $(find ${PDT} -type d); do
-		[ ! -f "${node}"/compatible ] && continue
+	for node_compat in $(find ${PDT} -name compatible); do
+		node=$(dirname "${node_compat}")
 		# Check if node is available
 		if [[ -e "${node}"/status ]]; then
 			status=$(tr -d '\000' < "${node}"/status)
@@ -46,11 +46,10 @@ nodes_compatible=$(
 
 nodes_dev_bound=$(
 	IFS=$'\n'
-	for dev_dir in $(find /sys/devices -type d); do
-		[ ! -f "${dev_dir}"/uevent ] && continue
-		[ ! -d "${dev_dir}"/driver ] && continue
-
-		grep '^OF_FULLNAME=' "${dev_dir}"/uevent | sed -e 's|OF_FULLNAME=||'
+	for uevent in $(find /sys/devices -name uevent); do
+		if [[ -d "$(dirname "${uevent}")"/driver ]]; then
+			grep '^OF_FULLNAME=' "${uevent}" | sed -e 's|OF_FULLNAME=||'
+		fi
 	done
 	)
 

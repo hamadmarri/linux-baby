@@ -216,7 +216,7 @@ static int hwpoison_filter_dev(struct page *p)
 	if (mapping == NULL || mapping->host == NULL)
 		return -EINVAL;
 
-	dev = mapping->host->i_sb->s_dev;
+	dev = inode_get_dev(mapping->host);
 	if (hwpoison_filter_dev_major != ~0U &&
 	    hwpoison_filter_dev_major != MAJOR(dev))
 		return -EINVAL;
@@ -976,7 +976,7 @@ static bool has_extra_refcount(struct page_state *ps, struct page *p,
 	int count = page_count(p) - 1;
 
 	if (extra_pins)
-		count -= folio_nr_pages(page_folio(p));
+		count -= 1;
 
 	if (count > 0) {
 		pr_err("%#lx: %s still referenced by %d users\n",

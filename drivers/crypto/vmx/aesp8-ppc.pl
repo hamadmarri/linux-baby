@@ -1,4 +1,4 @@
-#! /usr/bin/env perl
+#!/usr/bin/perl
 # SPDX-License-Identifier: GPL-2.0
 
 # This code is taken from CRYPTOGAMs[1] and is included here using the option

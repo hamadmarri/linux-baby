@@ -591,7 +591,7 @@ static bool try_fixup_enqcmd_gp(void)
 	if (!mm_valid_pasid(current->mm))
 		return false;
 
-	pasid = mm_get_enqcmd_pasid(current->mm);
+	pasid = current->mm->pasid;
 
 	/*
 	 * Did this thread already have its PASID activated?

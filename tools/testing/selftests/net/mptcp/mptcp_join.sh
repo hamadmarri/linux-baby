@@ -611,9 +611,25 @@ wait_local_port_listen()
 	done
 }
 
+# $1: ns ; $2: counter
+get_counter()
+{
+	local ns="${1}"
+	local counter="${2}"
+	local count
+
+	count=$(ip netns exec ${ns} nstat -asz "${counter}" | awk 'NR==1 {next} {print $2}')
+	if [ -z "${count}" ]; then
+		mptcp_lib_fail_if_expected_feature "${counter} counter"
+		return 1
+	fi
+
+	echo "${count}"
+}
+
 rm_addr_count()
 {
-	mptcp_lib_get_counter "${1}" "MPTcpExtRmAddr"
+	get_counter "${1}" "MPTcpExtRmAddr"
 }
 
 # $1: ns, $2: old rm_addr counter in $ns
@@ -633,7 +649,7 @@ wait_rm_addr()
 
 rm_sf_count()
 {
-	mptcp_lib_get_counter "${1}" "MPTcpExtRmSubflow"
+	get_counter "${1}" "MPTcpExtRmSubflow"
 }
 
 # $1: ns, $2: old rm_sf counter in $ns
@@ -656,20 +672,33 @@ wait_mpj()
 	local ns="${1}"
 	local cnt old_cnt
 
-	old_cnt=$(mptcp_lib_get_counter ${ns} "MPTcpExtMPJoinAckRx")
+	old_cnt=$(get_counter ${ns} "MPTcpExtMPJoinAckRx")
 
 	local i
 	for i in $(seq 10); do
-		cnt=$(mptcp_lib_get_counter ${ns} "MPTcpExtMPJoinAckRx")
+		cnt=$(get_counter ${ns} "MPTcpExtMPJoinAckRx")
 		[ "$cnt" = "${old_cnt}" ] || break
 		sleep 0.1
 	done
 }
 
+kill_wait()
+{
+	kill $1 > /dev/null 2>&1
+	wait $1 2>/dev/null
+}
+
 kill_events_pids()
 {
-	mptcp_lib_kill_wait $evts_ns1_pid
-	mptcp_lib_kill_wait $evts_ns2_pid
+	kill_wait $evts_ns1_pid
+	kill_wait $evts_ns2_pid
+}
+
+kill_tests_wait()
+{
+	#shellcheck disable=SC2046
+	kill -SIGUSR1 $(ip netns pids $ns2) $(ip netns pids $ns1)
+	wait
 }
 
 pm_nl_set_limits()
@@ -1255,7 +1284,7 @@ chk_csum_nr()
 	fi
 
 	print_check "sum"
-	count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtDataCsumErr")
+	count=$(get_counter ${ns1} "MPTcpExtDataCsumErr")
 	if [ "$count" != "$csum_ns1" ]; then
 		extra_msg="$extra_msg ns1=$count"
 	fi
@@ -1268,7 +1297,7 @@ chk_csum_nr()
 		print_ok
 	fi
 	print_check "csum"
-	count=$(mptcp_lib_get_counter ${ns2} "MPTcpExtDataCsumErr")
+	count=$(get_counter ${ns2} "MPTcpExtDataCsumErr")
 	if [ "$count" != "$csum_ns2" ]; then
 		extra_msg="$extra_msg ns2=$count"
 	fi
@@ -1312,7 +1341,7 @@ chk_fail_nr()
 	fi
 
 	print_check "ftx"
-	count=$(mptcp_lib_get_counter ${ns_tx} "MPTcpExtMPFailTx")
+	count=$(get_counter ${ns_tx} "MPTcpExtMPFailTx")
 	if [ "$count" != "$fail_tx" ]; then
 		extra_msg="$extra_msg,tx=$count"
 	fi
@@ -1326,7 +1355,7 @@ chk_fail_nr()
 	fi
 
 	print_check "failrx"
-	count=$(mptcp_lib_get_counter ${ns_rx} "MPTcpExtMPFailRx")
+	count=$(get_counter ${ns_rx} "MPTcpExtMPFailRx")
 	if [ "$count" != "$fail_rx" ]; then
 		extra_msg="$extra_msg,rx=$count"
 	fi
@@ -1359,7 +1388,7 @@ chk_fclose_nr()
 	fi
 
 	print_check "ctx"
-	count=$(mptcp_lib_get_counter ${ns_tx} "MPTcpExtMPFastcloseTx")
+	count=$(get_counter ${ns_tx} "MPTcpExtMPFastcloseTx")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$fclose_tx" ]; then
@@ -1370,7 +1399,7 @@ chk_fclose_nr()
 	fi
 
 	print_check "fclzrx"
-	count=$(mptcp_lib_get_counter ${ns_rx} "MPTcpExtMPFastcloseRx")
+	count=$(get_counter ${ns_rx} "MPTcpExtMPFastcloseRx")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$fclose_rx" ]; then
@@ -1400,7 +1429,7 @@ chk_rst_nr()
 	fi
 
 	print_check "rtx"
-	count=$(mptcp_lib_get_counter ${ns_tx} "MPTcpExtMPRstTx")
+	count=$(get_counter ${ns_tx} "MPTcpExtMPRstTx")
 	if [ -z "$count" ]; then
 		print_skip
 	# accept more rst than expected except if we don't expect any
@@ -1412,7 +1441,7 @@ chk_rst_nr()
 	fi
 
 	print_check "rstrx"
-	count=$(mptcp_lib_get_counter ${ns_rx} "MPTcpExtMPRstRx")
+	count=$(get_counter ${ns_rx} "MPTcpExtMPRstRx")
 	if [ -z "$count" ]; then
 		print_skip
 	# accept more rst than expected except if we don't expect any
@@ -1433,7 +1462,7 @@ chk_infi_nr()
 	local count
 
 	print_check "itx"
-	count=$(mptcp_lib_get_counter ${ns2} "MPTcpExtInfiniteMapTx")
+	count=$(get_counter ${ns2} "MPTcpExtInfiniteMapTx")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$infi_tx" ]; then
@@ -1443,7 +1472,7 @@ chk_infi_nr()
 	fi
 
 	print_check "infirx"
-	count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtInfiniteMapRx")
+	count=$(get_counter ${ns1} "MPTcpExtInfiniteMapRx")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$infi_rx" ]; then
@@ -1472,7 +1501,7 @@ chk_join_nr()
 	fi
 
 	print_check "syn"
-	count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtMPJoinSynRx")
+	count=$(get_counter ${ns1} "MPTcpExtMPJoinSynRx")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$syn_nr" ]; then
@@ -1483,7 +1512,7 @@ chk_join_nr()
 
 	print_check "synack"
 	with_cookie=$(ip netns exec $ns2 sysctl -n net.ipv4.tcp_syncookies)
-	count=$(mptcp_lib_get_counter ${ns2} "MPTcpExtMPJoinSynAckRx")
+	count=$(get_counter ${ns2} "MPTcpExtMPJoinSynAckRx")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$syn_ack_nr" ]; then
@@ -1500,7 +1529,7 @@ chk_join_nr()
 	fi
 
 	print_check "ack"
-	count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtMPJoinAckRx")
+	count=$(get_counter ${ns1} "MPTcpExtMPJoinAckRx")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$ack_nr" ]; then
@@ -1533,8 +1562,8 @@ chk_stale_nr()
 
 	print_check "stale"
 
-	stale_nr=$(mptcp_lib_get_counter ${ns} "MPTcpExtSubflowStale")
-	recover_nr=$(mptcp_lib_get_counter ${ns} "MPTcpExtSubflowRecover")
+	stale_nr=$(get_counter ${ns} "MPTcpExtSubflowStale")
+	recover_nr=$(get_counter ${ns} "MPTcpExtSubflowRecover")
 	if [ -z "$stale_nr" ] || [ -z "$recover_nr" ]; then
 		print_skip
 	elif [ $stale_nr -lt $stale_min ] ||
@@ -1571,7 +1600,7 @@ chk_add_nr()
 	timeout=$(ip netns exec $ns1 sysctl -n net.mptcp.add_addr_timeout)
 
 	print_check "add"
-	count=$(mptcp_lib_get_counter ${ns2} "MPTcpExtAddAddr")
+	count=$(get_counter ${ns2} "MPTcpExtAddAddr")
 	if [ -z "$count" ]; then
 		print_skip
 	# if the test configured a short timeout tolerate greater then expected
@@ -1583,7 +1612,7 @@ chk_add_nr()
 	fi
 
 	print_check "echo"
-	count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtEchoAdd")
+	count=$(get_counter ${ns1} "MPTcpExtEchoAdd")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$echo_nr" ]; then
@@ -1594,7 +1623,7 @@ chk_add_nr()
 
 	if [ $port_nr -gt 0 ]; then
 		print_check "pt"
-		count=$(mptcp_lib_get_counter ${ns2} "MPTcpExtPortAdd")
+		count=$(get_counter ${ns2} "MPTcpExtPortAdd")
 		if [ -z "$count" ]; then
 			print_skip
 		elif [ "$count" != "$port_nr" ]; then
@@ -1604,7 +1633,7 @@ chk_add_nr()
 		fi
 
 		print_check "syn"
-		count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtMPJoinPortSynRx")
+		count=$(get_counter ${ns1} "MPTcpExtMPJoinPortSynRx")
 		if [ -z "$count" ]; then
 			print_skip
 		elif [ "$count" != "$syn_nr" ]; then
@@ -1615,7 +1644,7 @@ chk_add_nr()
 		fi
 
 		print_check "synack"
-		count=$(mptcp_lib_get_counter ${ns2} "MPTcpExtMPJoinPortSynAckRx")
+		count=$(get_counter ${ns2} "MPTcpExtMPJoinPortSynAckRx")
 		if [ -z "$count" ]; then
 			print_skip
 		elif [ "$count" != "$syn_ack_nr" ]; then
@@ -1626,7 +1655,7 @@ chk_add_nr()
 		fi
 
 		print_check "ack"
-		count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtMPJoinPortAckRx")
+		count=$(get_counter ${ns1} "MPTcpExtMPJoinPortAckRx")
 		if [ -z "$count" ]; then
 			print_skip
 		elif [ "$count" != "$ack_nr" ]; then
@@ -1637,7 +1666,7 @@ chk_add_nr()
 		fi
 
 		print_check "syn"
-		count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtMismatchPortSynRx")
+		count=$(get_counter ${ns1} "MPTcpExtMismatchPortSynRx")
 		if [ -z "$count" ]; then
 			print_skip
 		elif [ "$count" != "$mis_syn_nr" ]; then
@@ -1648,7 +1677,7 @@ chk_add_nr()
 		fi
 
 		print_check "ack"
-		count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtMismatchPortAckRx")
+		count=$(get_counter ${ns1} "MPTcpExtMismatchPortAckRx")
 		if [ -z "$count" ]; then
 			print_skip
 		elif [ "$count" != "$mis_ack_nr" ]; then
@@ -1670,7 +1699,7 @@ chk_add_tx_nr()
 	timeout=$(ip netns exec $ns1 sysctl -n net.mptcp.add_addr_timeout)
 
 	print_check "add TX"
-	count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtAddAddrTx")
+	count=$(get_counter ${ns1} "MPTcpExtAddAddrTx")
 	if [ -z "$count" ]; then
 		print_skip
 	# if the test configured a short timeout tolerate greater then expected
@@ -1682,7 +1711,7 @@ chk_add_tx_nr()
 	fi
 
 	print_check "echo TX"
-	count=$(mptcp_lib_get_counter ${ns2} "MPTcpExtEchoAddTx")
+	count=$(get_counter ${ns2} "MPTcpExtEchoAddTx")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$echo_tx_nr" ]; then
@@ -1720,7 +1749,7 @@ chk_rm_nr()
 	fi
 
 	print_check "rm"
-	count=$(mptcp_lib_get_counter ${addr_ns} "MPTcpExtRmAddr")
+	count=$(get_counter ${addr_ns} "MPTcpExtRmAddr")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$rm_addr_nr" ]; then
@@ -1730,13 +1759,13 @@ chk_rm_nr()
 	fi
 
 	print_check "rmsf"
-	count=$(mptcp_lib_get_counter ${subflow_ns} "MPTcpExtRmSubflow")
+	count=$(get_counter ${subflow_ns} "MPTcpExtRmSubflow")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ -n "$simult" ]; then
 		local cnt suffix
 
-		cnt=$(mptcp_lib_get_counter ${addr_ns} "MPTcpExtRmSubflow")
+		cnt=$(get_counter ${addr_ns} "MPTcpExtRmSubflow")
 
 		# in case of simult flush, the subflow removal count on each side is
 		# unreliable
@@ -1765,7 +1794,7 @@ chk_rm_tx_nr()
 	local rm_addr_tx_nr=$1
 
 	print_check "rm TX"
-	count=$(mptcp_lib_get_counter ${ns2} "MPTcpExtRmAddrTx")
+	count=$(get_counter ${ns2} "MPTcpExtRmAddrTx")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$rm_addr_tx_nr" ]; then
@@ -1782,7 +1811,7 @@ chk_prio_nr()
 	local count
 
 	print_check "ptx"
-	count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtMPPrioTx")
+	count=$(get_counter ${ns1} "MPTcpExtMPPrioTx")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$mp_prio_nr_tx" ]; then
@@ -1792,7 +1821,7 @@ chk_prio_nr()
 	fi
 
 	print_check "prx"
-	count=$(mptcp_lib_get_counter ${ns1} "MPTcpExtMPPrioRx")
+	count=$(get_counter ${ns1} "MPTcpExtMPPrioRx")
 	if [ -z "$count" ]; then
 		print_skip
 	elif [ "$count" != "$mp_prio_nr_rx" ]; then
@@ -1892,7 +1921,7 @@ wait_attempt_fail()
 	while [ $time -lt $timeout_ms ]; do
 		local cnt
 
-		cnt=$(mptcp_lib_get_counter ${ns} "TcpAttemptFails")
+		cnt=$(get_counter ${ns} "TcpAttemptFails")
 
 		[ "$cnt" = 1 ] && return 1
 		time=$((time + 100))
@@ -3410,7 +3439,7 @@ userspace_tests()
 		chk_rm_nr 1 1 invert
 		chk_mptcp_info subflows 0 subflows 0
 		kill_events_pids
-		mptcp_lib_kill_wait $tests_pid
+		wait $tests_pid
 	fi
 
 	# userspace pm create destroy subflow
@@ -3429,7 +3458,7 @@ userspace_tests()
 		chk_rm_nr 1 1
 		chk_mptcp_info subflows 0 subflows 0
 		kill_events_pids
-		mptcp_lib_kill_wait $tests_pid
+		wait $tests_pid
 	fi
 }
 
@@ -3443,8 +3472,7 @@ endpoint_tests()
 		pm_nl_set_limits $ns2 2 2
 		pm_nl_add_endpoint $ns1 10.0.2.1 flags signal
 		speed=slow \
-			run_tests $ns1 $ns2 10.0.1.1 &
-		local tests_pid=$!
+			run_tests $ns1 $ns2 10.0.1.1 2>/dev/null &
 
 		wait_mpj $ns1
 		pm_nl_check_endpoint "creation" \
@@ -3459,7 +3487,7 @@ endpoint_tests()
 		pm_nl_add_endpoint $ns2 10.0.2.2 flags signal
 		pm_nl_check_endpoint "modif is allowed" \
 			$ns2 10.0.2.2 id 1 flags signal
-		mptcp_lib_kill_wait $tests_pid
+		kill_tests_wait
 	fi
 
 	if reset "delete and re-add" &&
@@ -3468,8 +3496,7 @@ endpoint_tests()
 		pm_nl_set_limits $ns2 1 1
 		pm_nl_add_endpoint $ns2 10.0.2.2 id 2 dev ns2eth2 flags subflow
 		test_linkfail=4 speed=20 \
-			run_tests $ns1 $ns2 10.0.1.1 &
-		local tests_pid=$!
+			run_tests $ns1 $ns2 10.0.1.1 2>/dev/null &
 
 		wait_mpj $ns2
 		chk_subflow_nr "before delete" 2
@@ -3484,7 +3511,7 @@ endpoint_tests()
 		wait_mpj $ns2
 		chk_subflow_nr "after re-add" 2
 		chk_mptcp_info subflows 1 subflows 1
-		mptcp_lib_kill_wait $tests_pid
+		kill_tests_wait
 	fi
 }
 

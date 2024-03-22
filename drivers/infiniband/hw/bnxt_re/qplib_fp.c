@@ -748,8 +748,7 @@ int bnxt_qplib_query_srq(struct bnxt_qplib_res *res,
 	bnxt_qplib_fill_cmdqmsg(&msg, &req, &resp, &sbuf, sizeof(req),
 				sizeof(resp), 0);
 	rc = bnxt_qplib_rcfw_send_message(rcfw, &msg);
-	if (!rc)
-		srq->threshold = le16_to_cpu(sb->srq_limit);
+	srq->threshold = le16_to_cpu(sb->srq_limit);
 	dma_free_coherent(&rcfw->pdev->dev, sbuf.size,
 			  sbuf.sb, sbuf.dma_addr);
 

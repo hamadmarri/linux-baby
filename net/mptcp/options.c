@@ -962,7 +962,9 @@ static bool check_fully_established(struct mptcp_sock *msk, struct sock *ssk,
 		/* subflows are fully established as soon as we get any
 		 * additional ack, including ADD_ADDR.
 		 */
-		goto set_fully_established;
+		subflow->fully_established = 1;
+		WRITE_ONCE(msk->fully_established, true);
+		goto check_notify;
 	}
 
 	/* If the first established packet does not contain MP_CAPABLE + data
@@ -984,10 +986,7 @@ static bool check_fully_established(struct mptcp_sock *msk, struct sock *ssk,
 set_fully_established:
 	if (unlikely(!READ_ONCE(msk->pm.server_side)))
 		pr_warn_once("bogus mpc option on established client sk");
-
-	mptcp_data_lock((struct sock *)msk);
-	__mptcp_subflow_fully_established(msk, subflow, mp_opt);
-	mptcp_data_unlock((struct sock *)msk);
+	mptcp_subflow_fully_established(subflow, mp_opt);
 
 check_notify:
 	/* if the subflow is not already linked into the conn_list, we can't

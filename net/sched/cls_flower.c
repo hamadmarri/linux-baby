@@ -2460,11 +2460,8 @@ unbind_filter:
 	}
 
 errout_idr:
-	if (!fold) {
-		spin_lock(&tp->lock);
+	if (!fold)
 		idr_remove(&head->handle_idr, fnew->handle);
-		spin_unlock(&tp->lock);
-	}
 	__fl_put(fnew);
 errout_tb:
 	kfree(tb);

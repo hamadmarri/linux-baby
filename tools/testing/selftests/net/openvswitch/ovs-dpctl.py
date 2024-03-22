@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 # SPDX-License-Identifier: GPL-2.0
 
 # Controls the openvswitch module.  Part of the kselftest suite, but

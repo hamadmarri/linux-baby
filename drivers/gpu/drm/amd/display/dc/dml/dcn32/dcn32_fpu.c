@@ -1089,7 +1089,7 @@ struct pipe_slice_table {
 		struct pipe_ctx *pri_pipe;
 		struct dc_plane_state *plane;
 		int slice_count;
-	} mpc_combines[MAX_PLANES];
+	} mpc_combines[MAX_SURFACES];
 	int mpc_combine_count;
 };
 

@@ -369,7 +369,6 @@ int pasemi_i2c_common_probe(struct pasemi_smbus *smbus)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(pasemi_i2c_common_probe);
 
 irqreturn_t pasemi_irq_handler(int irq, void *dev_id)
 {
@@ -379,8 +378,3 @@ irqreturn_t pasemi_irq_handler(int irq, void *dev_id)
 	complete(&smbus->irq_completion);
 	return IRQ_HANDLED;
 }
-EXPORT_SYMBOL_GPL(pasemi_irq_handler);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Olof Johansson <olof@lixom.net>");
-MODULE_DESCRIPTION("PA Semi PWRficient SMBus driver");

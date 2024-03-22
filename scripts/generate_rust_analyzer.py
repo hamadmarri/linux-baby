@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 # SPDX-License-Identifier: GPL-2.0
 """generate_rust_analyzer - Generates the `rust-project.json` file for `rust-analyzer`.
 """

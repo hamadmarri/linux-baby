@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl
 # SPDX-License-Identifier: GPL-1.0+ OR BSD-3-Clause
 #
 # ====================================================================

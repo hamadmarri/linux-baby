@@ -2459,36 +2459,29 @@ static void pci_pme_list_scan(struct work_struct *work)
 		if (pdev->pme_poll) {
 			struct pci_dev *bridge = pdev->bus->self;
 			struct device *dev = &pdev->dev;
-			struct device *bdev = bridge ? &bridge->dev : NULL;
-			int bref = 0;
+			int pm_status;
 
 			/*
-			 * If we have a bridge, it should be in an active/D0
-			 * state or the configuration space of subordinate
-			 * devices may not be accessible or stable over the
-			 * course of the call.
+			 * If bridge is in low power state, the
+			 * configuration space of subordinate devices
+			 * may be not accessible
 			 */
-			if (bdev) {
-				bref = pm_runtime_get_if_active(bdev, true);
-				if (!bref)
-					continue;
-
-				if (bridge->current_state != PCI_D0)
-					goto put_bridge;
-			}
+			if (bridge && bridge->current_state != PCI_D0)
+				continue;
 
 			/*
-			 * The device itself should be suspended but config
-			 * space must be accessible, therefore it cannot be in
-			 * D3cold.
+			 * If the device is in a low power state it
+			 * should not be polled either.
 			 */
-			if (pm_runtime_suspended(dev) &&
-			    pdev->current_state != PCI_D3cold)
+			pm_status = pm_runtime_get_if_active(dev, true);
+			if (!pm_status)
+				continue;
+
+			if (pdev->current_state != PCI_D3cold)
 				pci_pme_wakeup(pdev, NULL);
 
-put_bridge:
-			if (bref > 0)
-				pm_runtime_put(bdev);
+			if (pm_status > 0)
+				pm_runtime_put(dev);
 		} else {
 			list_del(&pme_dev->list);
 			kfree(pme_dev);

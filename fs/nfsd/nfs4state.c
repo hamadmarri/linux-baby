@@ -2593,10 +2593,11 @@ static void nfs4_show_fname(struct seq_file *s, struct nfsd_file *f)
 static void nfs4_show_superblock(struct seq_file *s, struct nfsd_file *f)
 {
 	struct inode *inode = file_inode(f->nf_file);
+	dev_t dev = inode_get_dev(inode);
 
 	seq_printf(s, "superblock: \"%02x:%02x:%ld\"",
-					MAJOR(inode->i_sb->s_dev),
-					 MINOR(inode->i_sb->s_dev),
+					MAJOR(dev),
+					 MINOR(dev),
 					 inode->i_ino);
 }
 
@@ -4945,8 +4946,10 @@ nfsd_break_deleg_cb(struct file_lock *fl)
 	 */
 	fl->fl_break_time = 0;
 
+	spin_lock(&fp->fi_lock);
 	fp->fi_had_conflict = true;
 	nfsd_break_one_deleg(dp);
+	spin_unlock(&fp->fi_lock);
 	return false;
 }
 
@@ -5555,13 +5558,12 @@ nfs4_set_delegation(struct nfsd4_open *open, struct nfs4_ol_stateid *stp,
 	if (status)
 		goto out_unlock;
 
-	status = -EAGAIN;
-	if (fp->fi_had_conflict)
-		goto out_unlock;
-
 	spin_lock(&state_lock);
 	spin_lock(&fp->fi_lock);
-	status = hash_delegation_locked(dp, fp);
+	if (fp->fi_had_conflict)
+		status = -EAGAIN;
+	else
+		status = hash_delegation_locked(dp, fp);
 	spin_unlock(&fp->fi_lock);
 	spin_unlock(&state_lock);
 

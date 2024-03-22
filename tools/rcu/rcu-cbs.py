@@ -1,4 +1,4 @@
-#!/usr/bin/env drgn
+#!/usr/bin/drgn
 # SPDX-License-Identifier: GPL-2.0+
 #
 # Dump out the number of RCU callbacks outstanding.

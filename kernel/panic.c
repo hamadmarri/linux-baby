@@ -483,6 +483,9 @@ const struct taint_flag taint_flags[TAINT_FLAGS_COUNT] = {
 	[ TAINT_AUX ]			= { 'X', ' ', true },
 	[ TAINT_RANDSTRUCT ]		= { 'T', ' ', true },
 	[ TAINT_TEST ]			= { 'N', ' ', true },
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+	[ TAINT_NO_SUPPORT ]		= { 'n', ' ', true },
+#endif
 };
 
 /**
@@ -506,6 +509,9 @@ const char *print_tainted(void)
 		s = buf + sprintf(buf, "Tainted: ");
 		for (i = 0; i < TAINT_FLAGS_COUNT; i++) {
 			const struct taint_flag *t = &taint_flags[i];
+
+			if (!t->c_true)
+				continue;
 			*s++ = test_bit(i, &tainted_mask) ?
 					t->c_true : t->c_false;
 		}
