@@ -1001,7 +1001,6 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 	PN(se.bs_node.vburst);
 	PN(se.bs_node.prev_vburst);
 	PN(se.bs_node.est);
-	PN(se.bs_node.alpha);
 
 	nr_switches = p->nvcsw + p->nivcsw;
 

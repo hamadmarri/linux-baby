@@ -550,14 +550,13 @@ struct sched_statistics {
 
 struct bs_node {
 	struct bs_node*                 next;
-	u64				vruntime_start;
+	u64				c_vrt_start;
+	u64				r_vrt_start;
 	u64				vburst;
 #ifdef CONFIG_SCHED_DEBUG
 	u64				prev_vburst;
 #endif
 	u64				est;
-	u32				alpha;
-
 };
 
 struct sched_entity {
