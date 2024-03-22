@@ -444,16 +444,14 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
 	return delta;
 }
 
-/*
- * XXX: strictly: vd_i += N*r_i/w_i such that: vd_i > ve_i
- * this is probably good enough.
- */
 static void update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	if (cfs_rq->nr_running <= 1)
+	unsigned int n = cfs_rq->nr_running;
+
+	if (n <= 1)
 		se->slice = bs_shared_quota;
 	else
-		se->slice = bs_shared_quota / cfs_rq->nr_running;
+		se->slice = max(bs_shared_quota / n, sysctl_sched_base_slice);
 }
 
 #ifdef CONFIG_SCHED_HRTICK
