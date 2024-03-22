@@ -255,7 +255,7 @@ static int migrate_degrades_locality(struct task_struct *p, struct rq *dst_rq, s
 	if (!static_branch_likely(&sched_numa_balancing))
 		return -1;
 
-	if (!p->numa_faults || !(env->sd->flags & SD_NUMA))
+	if (!p->numa_faults)
 		return -1;
 
 	src_nid = cpu_to_node(cpu_of(src_rq));

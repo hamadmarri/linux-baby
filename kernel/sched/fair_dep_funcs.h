@@ -167,6 +167,8 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 	/* Tell new CPU we are migrated */
 	se->avg.last_update_time = 0;
 
+	p->se.yielded = false;
+
 	update_scan_period(p, new_cpu);
 }
 
@@ -448,29 +450,10 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
  */
 static void update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	// if ((s64)(se->vruntime - se->deadline) < 0)
-	// 	return;
-
-	/*
-	 * For EEVDF the virtual time slope is determined by w_i (iow.
-	 * nice) while the request time r_i is determined by
-	 * sysctl_sched_base_slice.
-	 */
-	if (cfs_rq->nr_running == 0)
+	if (cfs_rq->nr_running <= 1)
 		se->slice = bs_shared_quota;
 	else
 		se->slice = bs_shared_quota / cfs_rq->nr_running;
-
-	// /*
-	//  * EEVDF: vd_i = ve_i + r_i / w_i
-	//  */
-	// se->deadline = se->vruntime + calc_delta_fair(se->slice, se);
- //
-	// /*
-	//  * The task has consumed its request, reschedule.
-	//  */
-	// if (cfs_rq->nr_running > 1)
-	// 	resched_curr(rq_of(cfs_rq));
 }
 
 #ifdef CONFIG_SCHED_HRTICK
@@ -485,7 +468,7 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *p)
 		u64 slice = se->slice;
 		s64 delta = slice - ran;
 
-		if (delta < 0) {
+		if (se->yielded || delta < 0) {
 			if (task_current(rq, p))
 				resched_curr(rq);
 			return;
