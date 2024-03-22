@@ -1895,6 +1895,7 @@ DECLARE_PER_CPU(struct sched_domain_shared __rcu *, sd_llc_shared);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_numa);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_packing);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
+DECLARE_PER_CPU(int, nr_lat_sensitive);
 extern struct static_key_false sched_asym_cpucapacity;
 extern struct static_key_false sched_cluster_active;
 
@@ -2551,6 +2552,9 @@ extern void wakeup_preempt(struct rq *rq, struct task_struct *p, int flags);
 #else
 #define SCHED_NR_MIGRATE_BREAK 32
 #endif
+
+extern inline void inc_nr_lat_sensitive(unsigned int cpu, struct task_struct *p);
+extern inline void dec_nr_lat_sensitive(unsigned int cpu);
 
 extern const_debug unsigned int sysctl_sched_nr_migrate;
 extern const_debug unsigned int sysctl_sched_migration_cost;
