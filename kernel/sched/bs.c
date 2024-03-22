@@ -87,8 +87,6 @@ static inline void __update_candidate(struct cfs_rq *cfs_rq, struct bs_node *bsn
 		global_candidate.candidate = bsn;
 		global_candidate.est = bsn->est;
 		raw_spin_unlock_irqrestore(&global_candidate.lock, flags);
-
-		// printk(KERN_INFO "__update_candidate");
 	}
 }
 
@@ -412,8 +410,6 @@ static void yield_task_fair(struct rq *rq)
 	 */
 	if (unlikely(rq->nr_running == 1))
 		return;
-
-	printk(KERN_INFO "yield_task_fair");
 
 	curr->se.yielded = true;
 
