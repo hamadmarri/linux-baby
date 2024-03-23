@@ -15,7 +15,7 @@
 #include "pelt.h"
 
 unsigned int sysctl_sched_base_slice	= 7000ULL;
-unsigned int bs_shared_quota		= 6600000ULL; // 6.6ms
+unsigned int bs_shared_quota		= 105000ULL; // 105us
 u32 alpha				= 500U;
 
 struct lb_env {
@@ -471,6 +471,7 @@ static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int 
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	struct task_struct *curr = rq->curr;
 	struct sched_entity *curr_se = &curr->se, *pse = &p->se;
+	int cse_is_idle, pse_is_idle;
 
 	if (unlikely(curr_se == pse))
 		return;
@@ -490,6 +491,18 @@ static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int 
 	if (unlikely(p->policy != SCHED_NORMAL) || !sched_feat(WAKEUP_PREEMPTION))
 		return;
 
+	cse_is_idle = se_is_idle(curr_se);
+	pse_is_idle = se_is_idle(pse);
+
+	/*
+	 * Preempt an idle group in favor of a non-idle group (and don't preempt
+	 * in the inverse case).
+	 */
+	if (cse_is_idle && !pse_is_idle)
+		goto preempt;
+	if (cse_is_idle != pse_is_idle)
+		return;
+
 	update_curr(cfs_rq_of(curr_se));
 
 	/*
@@ -500,7 +513,7 @@ static void check_preempt_wakeup_fair(struct rq *rq, struct task_struct *p, int 
 	if (__entity_end_quota(cfs_rq, curr_se))
 		goto preempt;
 
-	if (entity_before(&pse->bs_node, &curr_se->bs_node) && entity_end_min_slice(curr_se))
+	if (entity_before(&pse->bs_node, &curr_se->bs_node))
 		goto preempt;
 
 	return;

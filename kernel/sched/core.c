@@ -4543,7 +4543,7 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.slice			= 0;
 
 	p->se.bs_node.vburst		= 0;
-	p->se.bs_node.est		= (u64)bs_shared_quota;
+	p->se.bs_node.est		= 0;
 
 	INIT_LIST_HEAD(&p->se.group_node);
 
