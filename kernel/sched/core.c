@@ -9945,7 +9945,7 @@ void __init sched_init(void)
 
 	wait_bit_init();
 
-	printk(KERN_INFO "Baby CPU scheduler v6.7 by Hamad Al Marri.");
+	printk(KERN_INFO "ECHO CPU scheduler v6.7 by Hamad Al Marri.");
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	ptr += 2 * nr_cpu_ids * sizeof(void **);
