@@ -4540,7 +4540,7 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
 	p->se.vlag			= 0;
-	p->se.slice			= 0;
+	p->se.slice			= sysctl_sched_base_slice;
 
 	p->se.bs_node.vburst		= 0;
 	p->se.bs_node.est		= 0;
@@ -5785,6 +5785,7 @@ static void sched_tick_remote(struct work_struct *work)
 
 		if (cpu_online(cpu)) {
 			update_rq_clock(rq);
+
 			if (!is_idle_task(curr)) {
 				/*
 				 * Make sure the next tick runs within a

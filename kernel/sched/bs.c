@@ -138,17 +138,19 @@ static void update_candidate(struct cfs_rq *cfs_rq)
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
+	struct task_struct *curtask = task_of(curr);
 	u64 now = rq_clock_task(rq_of(cfs_rq));
-	u64 delta_exec, calc;
+	s64 delta_exec, calc;
 
 	if (unlikely(!curr))
 		return;
 
 	delta_exec = now - curr->exec_start;
-	if (unlikely((s64)delta_exec <= 0))
+	if (unlikely(delta_exec <= 0))
 		return;
 
 	curr->exec_start = now;
+	curr->sum_exec_runtime += delta_exec;
 
 	if (schedstat_enabled()) {
 		struct sched_statistics *stats;
@@ -157,9 +159,6 @@ static void update_curr(struct cfs_rq *cfs_rq)
 		__schedstat_set(stats->exec_max,
 				max(delta_exec, stats->exec_max));
 	}
-
-	curr->sum_exec_runtime += delta_exec;
-	schedstat_add(cfs_rq->exec_clock, delta_exec);
 
 	calc = calc_delta_fair(delta_exec, curr);
 	curr->vruntime			+= calc;
@@ -173,13 +172,11 @@ static void update_curr(struct cfs_rq *cfs_rq)
 
 	cfs_rq->local_cand_est = curr->bs_node.est;
 
-	if (entity_is_task(curr)) {
-		struct task_struct *curtask = task_of(curr);
-
-		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
-		cgroup_account_cputime(curtask, delta_exec);
-		account_group_exec_runtime(curtask, delta_exec);
-	}
+	trace_sched_stat_runtime(curtask, delta_exec);
+	account_group_exec_runtime(curtask, delta_exec);
+	cgroup_account_cputime(curtask, delta_exec);
+	if (curtask->dl_server)
+		dl_server_update(curtask->dl_server, delta_exec);
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -258,27 +255,6 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct bs_node *bsn)
 		prev->next = itr->next;
 }
 
-// static u32
-// update_alpha(struct bs_node *bsn, u64 vburst, u64 prev_est, u32 prev_alpha)
-// {
-// 	u32 new_alpha;
-// 	u64 error_part;
-//
-// 	if (vburst == 0)
-// 		return prev_alpha;
-//
-// 	// 0.15 * <prev alpha> + 0.15 * MIN(1, error / <prev burst>)
-// 	new_alpha = (150 * prev_alpha) / 1000;
-//
-// 	error_part = abs((s64)(vburst - prev_est)) * 1000;
-// 	error_part = min(1000, error_part / vburst);
-// 	error_part = (150 * error_part) / 1000;
-//
-// 	bsn->alpha = new_alpha + (u32)error_part;
-//
-// 	return bsn->alpha ;
-// }
-
 static void
 update_est_entity(struct sched_entity *se)
 {
@@ -286,8 +262,6 @@ update_est_entity(struct sched_entity *se)
 	u64 vburst	= bsn->vburst;
 	u64 prev_est	= bsn->est;
 	u64 next_est;
-
-	// alpha = update_alpha(bsn, vburst, prev_est, alpha);
 
 	/*
 	 * <alpha> * <prev burst> + (1 - <alpha>) * <prev estimated>

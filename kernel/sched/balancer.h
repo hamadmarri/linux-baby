@@ -493,8 +493,7 @@ static int move_task(struct rq *dst_rq, struct rq *src_rq,
 	return 0;
 }
 
-
-int idle_pull_global_candidate(struct rq *dist_rq)
+static int idle_pull_global_candidate(struct rq *dist_rq)
 {
 	struct rq *src_rq;
 	struct task_struct *p;
