@@ -310,6 +310,20 @@ static void pull_from(struct task_struct *p, struct lb_env *env)
 }
 
 #ifdef CONFIG_NUMA_BALANCING
+/* Runqueue only has SCHED_IDLE tasks enqueued */
+static int sched_idle_rq(struct rq *rq)
+{
+	return unlikely(rq->nr_running == rq->cfs.idle_h_nr_running &&
+			rq->nr_running);
+}
+
+#ifdef CONFIG_SMP
+static int sched_idle_cpu(int cpu)
+{
+	return sched_idle_rq(cpu_rq(cpu));
+}
+#endif
+
 /*
  * Returns 1, if task migration degrades locality
  * Returns 0, if task migration improves locality i.e migration preferred.
