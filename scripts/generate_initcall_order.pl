@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl
 # SPDX-License-Identifier: GPL-2.0
 #
 # Generates a linker script that specifies the correct initcall order.

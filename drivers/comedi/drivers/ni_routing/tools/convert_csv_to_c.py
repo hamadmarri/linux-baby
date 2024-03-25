@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 # SPDX-License-Identifier: GPL-2.0+
 
 # This is simply to aide in creating the entries in the order of the value of

@@ -88,6 +88,22 @@ struct symsearch {
 	enum mod_license license;
 };
 
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+/* Allow unsupported modules switch. */
+#ifdef UNSUPPORTED_MODULES
+int suse_unsupported = UNSUPPORTED_MODULES;
+#else
+int suse_unsupported = 2;  /* don't warn when loading unsupported modules. */
+#endif
+
+static int __init unsupported_setup(char *str)
+{
+	get_option(&str, &suse_unsupported);
+	return 1;
+}
+__setup("unsupported=", unsupported_setup);
+#endif
+
 /*
  * Bounds of module memory, for speeding up __module_address.
  * Protected by module_mutex.
@@ -976,6 +992,33 @@ static ssize_t show_taint(struct module_attribute *mattr,
 static struct module_attribute modinfo_taint =
 	__ATTR(taint, 0444, show_taint, NULL);
 
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+static void setup_modinfo_supported(struct module *mod, const char *s)
+{
+	if (!s) {
+		mod->taints |= (1 << TAINT_NO_SUPPORT);
+		return;
+	}
+
+	if (strcmp(s, "external") == 0)
+		mod->taints |= (1 << TAINT_EXTERNAL_SUPPORT);
+	else if (strcmp(s, "yes"))
+		mod->taints |= (1 << TAINT_NO_SUPPORT);
+}
+
+static ssize_t show_modinfo_supported(struct module_attribute *mattr,
+				      struct module_kobject *mk, char *buffer)
+{
+	return sprintf(buffer, "%s\n", supported_printable(mk->mod->taints));
+}
+
+static struct module_attribute modinfo_supported = {
+	.attr = { .name = "supported", .mode = 0444 },
+	.show = show_modinfo_supported,
+	.setup = setup_modinfo_supported,
+};
+#endif
+
 struct module_attribute *modinfo_attrs[] = {
 	&module_uevent,
 	&modinfo_version,
@@ -987,6 +1030,9 @@ struct module_attribute *modinfo_attrs[] = {
 #endif
 	&modinfo_initsize,
 	&modinfo_taint,
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+	&modinfo_supported,
+#endif
 #ifdef CONFIG_MODULE_UNLOAD
 	&modinfo_refcnt,
 #endif
@@ -3355,6 +3401,9 @@ void print_modules(void)
 		pr_cont(" [last unloaded: %s%s]", last_unloaded_module.name,
 			last_unloaded_module.taints);
 	pr_cont("\n");
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+	printk("Supported: %s\n", supported_printable(get_taint()));
+#endif
 }
 
 #ifdef CONFIG_MODULE_DEBUGFS

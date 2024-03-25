@@ -2165,6 +2165,7 @@ struct super_operations {
 	long (*free_cached_objects)(struct super_block *,
 				    struct shrink_control *);
 	void (*shutdown)(struct super_block *sb);
+	dev_t (*get_inode_dev)(const struct inode *);
 };
 
 /*
@@ -3524,5 +3525,13 @@ extern int vfs_fadvise(struct file *file, loff_t offset, loff_t len,
 		       int advice);
 extern int generic_fadvise(struct file *file, loff_t offset, loff_t len,
 			   int advice);
+
+static inline dev_t inode_get_dev(const struct inode *inode)
+{
+	if (inode->i_sb->s_op->get_inode_dev)
+		return inode->i_sb->s_op->get_inode_dev(inode);
+
+	return inode->i_sb->s_dev;
+}
 
 #endif /* _LINUX_FS_H */

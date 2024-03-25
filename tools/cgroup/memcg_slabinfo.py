@@ -1,4 +1,4 @@
-#!/usr/bin/env drgn
+#!/usr/bin/drgn
 #
 # Copyright (C) 2020 Roman Gushchin <guro@fb.com>
 # Copyright (C) 2020 Facebook

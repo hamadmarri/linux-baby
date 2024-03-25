@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl
 # SPDX-License-Identifier: GPL-2.0
 #
 # checkdeclares: find struct declared more than once

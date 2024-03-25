@@ -1,4 +1,4 @@
-#! /usr/bin/env perl
+#!/usr/bin/perl
 # SPDX-License-Identifier: GPL-2.0
 #
 # Detect cycles in the header file dependency graph

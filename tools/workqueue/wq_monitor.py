@@ -1,4 +1,4 @@
-#!/usr/bin/env drgn
+#!/usr/bin/drgn
 #
 # Copyright (C) 2023 Tejun Heo <tj@kernel.org>
 # Copyright (C) 2023 Meta Platforms, Inc. and affiliates.

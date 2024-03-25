@@ -1,4 +1,4 @@
-#!/usr/bin/env drgn
+#!/usr/bin/drgn
 #
 # Copyright (C) 2019 Tejun Heo <tj@kernel.org>
 # Copyright (C) 2019 Facebook

@@ -14,6 +14,7 @@
 #include <linux/cpuhotplug.h>
 #include <linux/memblock.h>
 #include <linux/kmemleak.h>
+#include <linux/suse_version.h>
 
 #include <asm/page.h>
 #include <asm/sections.h>
@@ -738,6 +739,7 @@ static int __init crash_save_vmcoreinfo_init(void)
 	}
 
 	VMCOREINFO_OSRELEASE(init_uts_ns.name.release);
+	VMCOREINFO_NUMBER(SUSE_PRODUCT_CODE);
 	VMCOREINFO_BUILD_ID();
 	VMCOREINFO_PAGESIZE(PAGE_SIZE);
 
