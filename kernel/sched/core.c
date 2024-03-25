@@ -3347,6 +3347,24 @@ void relax_compatible_cpus_allowed_ptr(struct task_struct *p)
 	WARN_ON_ONCE(ret);
 }
 
+#ifdef CONFIG_ECHO_SCHED
+inline void inc_nr_lat_sensitive(unsigned int cpu, struct task_struct *p)
+{
+	if (per_cpu(nr_lat_sensitive, cpu) == 0 || per_cpu(nr_lat_sensitive, cpu) == -10)
+		per_cpu(nr_lat_sensitive, cpu) = HZ / 78;
+}
+
+inline void dec_nr_lat_sensitive(unsigned int cpu)
+{
+	if (per_cpu(nr_lat_sensitive, cpu) > -10) {
+		per_cpu(nr_lat_sensitive, cpu)--;
+
+		if (per_cpu(nr_lat_sensitive, cpu) == 0)
+			per_cpu(nr_lat_sensitive, cpu) = -1;
+	}
+}
+#endif
+
 void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 {
 #ifdef CONFIG_SCHED_DEBUG
@@ -4525,6 +4543,12 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.vruntime			= 0;
 	p->se.vlag			= 0;
 	p->se.slice			= sysctl_sched_base_slice;
+
+#ifdef CONFIG_ECHO_SCHED
+	p->se.bs_node.vburst		= 0;
+	p->se.bs_node.est		= 0;
+#endif
+
 	INIT_LIST_HEAD(&p->se.group_node);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -4687,6 +4711,15 @@ static int sysctl_schedstats(struct ctl_table *table, int write, void *buffer,
 
 #ifdef CONFIG_SYSCTL
 static struct ctl_table sched_core_sysctls[] = {
+#ifdef CONFIG_ECHO_SCHED
+	{
+		.procname	= "sched_bs_shared_quota",
+		.data		= &bs_shared_quota,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+#endif
 #ifdef CONFIG_SCHEDSTATS
 	{
 		.procname       = "sched_schedstats",
@@ -5688,6 +5721,13 @@ void scheduler_tick(void)
 
 	if (curr->flags & PF_WQ_WORKER)
 		wq_worker_tick(curr);
+
+#ifdef CONFIG_ECHO_SCHED
+	if (idle_cpu(cpu))
+		inc_nr_lat_sensitive(cpu, NULL);
+	else
+		dec_nr_lat_sensitive(cpu);
+#endif
 
 #ifdef CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
@@ -9897,6 +9937,10 @@ LIST_HEAD(task_groups);
 static struct kmem_cache *task_group_cache __ro_after_init;
 #endif
 
+#ifdef CONFIG_ECHO_SCHED
+DEFINE_PER_CPU(int, nr_lat_sensitive);
+#endif
+
 void __init sched_init(void)
 {
 	unsigned long ptr = 0;
@@ -9911,6 +9955,10 @@ void __init sched_init(void)
 #endif
 
 	wait_bit_init();
+
+#ifdef CONFIG_ECHO_SCHED
+	printk(KERN_INFO "ECHO CPU scheduler v6.7 by Hamad Al Marri.");
+#endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	ptr += 2 * nr_cpu_ids * sizeof(void **);
@@ -10030,6 +10078,10 @@ void __init sched_init(void)
 #endif /* CONFIG_SMP */
 		hrtick_rq_init(rq);
 		atomic_set(&rq->nr_iowait, 0);
+
+#ifdef CONFIG_ECHO_SCHED
+		per_cpu(nr_lat_sensitive, i) = 0;
+#endif
 
 #ifdef CONFIG_SCHED_CORE
 		rq->core = rq;

@@ -1003,6 +1003,11 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 	PN(se.exec_start);
 	PN(se.vruntime);
 	PN(se.sum_exec_runtime);
+#ifdef CONFIG_ECHO_SCHED
+	PN(se.bs_node.vburst);
+	PN(se.bs_node.prev_vburst);
+	PN(se.bs_node.est);
+#endif
 
 	nr_switches = p->nvcsw + p->nivcsw;
 

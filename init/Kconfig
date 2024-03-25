@@ -130,6 +130,12 @@ config THREAD_INFO_IN_TASK
 	  One subtle change that will be needed is to use try_get_task_stack()
 	  and put_task_stack() in save_thread_stack_tsk() and get_wchan().
 
+config ECHO_SCHED
+	bool "ECHO CPU Scheduler"
+	default y
+	help
+	  https://github.com/hamadmarri/ECHO-CPU-Scheduler
+
 menu "General setup"
 
 config BROKEN
@@ -1008,11 +1014,12 @@ menuconfig CGROUP_SCHED
 if CGROUP_SCHED
 config FAIR_GROUP_SCHED
 	bool "Group scheduling for SCHED_OTHER"
-	depends on CGROUP_SCHED
-	default CGROUP_SCHED
+	depends on CGROUP_SCHED && !ECHO_SCHED
+	default n
 
 config CFS_BANDWIDTH
 	bool "CPU bandwidth provisioning for FAIR_GROUP_SCHED"
+	depends on !ECHO_SCHED
 	depends on FAIR_GROUP_SCHED
 	default n
 	help
@@ -1281,9 +1288,11 @@ config CHECKPOINT_RESTORE
 
 config SCHED_AUTOGROUP
 	bool "Automatic process group scheduling"
+	depends on !ECHO_SCHED
 	select CGROUPS
 	select CGROUP_SCHED
 	select FAIR_GROUP_SCHED
+	default n
 	help
 	  This option optimizes the scheduler for common desktop workloads by
 	  automatically creating and populating task groups.  This separation
