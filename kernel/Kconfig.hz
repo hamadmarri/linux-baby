@@ -42,6 +42,10 @@ choice
 
 	config HZ_625
 		bool "625 HZ"
+	help
+	 The default HZ for ECHO is 625HZ - ticks every 1.6ms.
+	 No need to increase it since the HighRes clock handles
+	 the task preemption in 105us max.
 
 	config HZ_1000
 		bool "1000 HZ"
