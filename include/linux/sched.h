@@ -533,6 +533,7 @@ struct sched_statistics {
 #endif /* CONFIG_SCHEDSTATS */
 } ____cacheline_aligned;
 
+#ifdef CONFIG_ECHO_SCHED
 struct bs_node {
 	struct bs_node*                 next;
 	u64				c_vrt_start;
@@ -543,6 +544,7 @@ struct bs_node {
 #endif
 	u64				est;
 };
+#endif
 
 struct sched_entity {
 	/* For load-balancing: */
@@ -553,17 +555,18 @@ struct sched_entity {
 
 	struct list_head		group_node;
 	unsigned int			on_rq;
-
+#ifdef CONFIG_ECHO_SCHED
 	struct bs_node                  bs_node;
-
+#endif
 	u64				exec_start;
 	u64				sum_exec_runtime;
 	u64				prev_sum_exec_runtime;
 	u64				vruntime;
 	s64				vlag;
 	u64				slice;
+#ifdef CONFIG_ECHO_SCHED
 	bool				yielded;
-
+#endif
 	u64				nr_migrations;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED

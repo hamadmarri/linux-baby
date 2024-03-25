@@ -237,8 +237,9 @@ exit_idle:
 static void do_idle(void)
 {
 	int cpu = smp_processor_id();
+#ifdef CONFIG_ECHO_SCHED
 	int pm_disabled = per_cpu(nr_lat_sensitive, cpu);
-
+#endif
 	/*
 	 * Check if we need to update blocked load
 	 */
@@ -306,7 +307,11 @@ static void do_idle(void)
 		 * broadcast device expired for us, we don't want to go deep
 		 * idle as we know that the IPI is going to arrive right away.
 		 */
-		if (pm_disabled > 0 || cpu_idle_force_poll || tick_check_broadcast_expired()) {
+		if (
+#ifdef CONFIG_ECHO_SCHED
+			pm_disabled > 0 ||
+#endif
+			cpu_idle_force_poll || tick_check_broadcast_expired()) {
 			tick_nohz_idle_restart_tick();
 			cpu_idle_poll();
 			dec_nr_lat_sensitive(cpu);
@@ -314,9 +319,10 @@ static void do_idle(void)
 			cpuidle_idle_call();
 		}
 
+#ifdef CONFIG_ECHO_SCHED
 		if (pm_disabled < 0)
 			dec_nr_lat_sensitive(cpu);
-
+#endif
 		arch_cpu_idle_exit();
 	}
 
