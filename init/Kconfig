@@ -988,7 +988,7 @@ if CGROUP_SCHED
 config FAIR_GROUP_SCHED
 	bool "Group scheduling for SCHED_OTHER"
 	depends on CGROUP_SCHED
-	default CGROUP_SCHED
+	default n
 
 config CFS_BANDWIDTH
 	bool "CPU bandwidth provisioning for FAIR_GROUP_SCHED"
@@ -1263,6 +1263,7 @@ config SCHED_AUTOGROUP
 	select CGROUPS
 	select CGROUP_SCHED
 	select FAIR_GROUP_SCHED
+	default n
 	help
 	  This option optimizes the scheduler for common desktop workloads by
 	  automatically creating and populating task groups.  This separation
