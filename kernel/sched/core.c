@@ -3347,24 +3347,6 @@ void relax_compatible_cpus_allowed_ptr(struct task_struct *p)
 	WARN_ON_ONCE(ret);
 }
 
-#ifdef CONFIG_ECHO_SCHED
-inline void inc_nr_lat_sensitive(unsigned int cpu, struct task_struct *p)
-{
-	if (per_cpu(nr_lat_sensitive, cpu) == 0 || per_cpu(nr_lat_sensitive, cpu) == -10)
-		per_cpu(nr_lat_sensitive, cpu) = HZ / 78;
-}
-
-inline void dec_nr_lat_sensitive(unsigned int cpu)
-{
-	if (per_cpu(nr_lat_sensitive, cpu) > -10) {
-		per_cpu(nr_lat_sensitive, cpu)--;
-
-		if (per_cpu(nr_lat_sensitive, cpu) == 0)
-			per_cpu(nr_lat_sensitive, cpu) = -1;
-	}
-}
-#endif
-
 void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 {
 #ifdef CONFIG_SCHED_DEBUG
@@ -5721,13 +5703,6 @@ void scheduler_tick(void)
 
 	if (curr->flags & PF_WQ_WORKER)
 		wq_worker_tick(curr);
-
-#ifdef CONFIG_ECHO_SCHED
-	if (idle_cpu(cpu))
-		inc_nr_lat_sensitive(cpu, NULL);
-	else
-		dec_nr_lat_sensitive(cpu);
-#endif
 
 #ifdef CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
@@ -9937,10 +9912,6 @@ LIST_HEAD(task_groups);
 static struct kmem_cache *task_group_cache __ro_after_init;
 #endif
 
-#ifdef CONFIG_ECHO_SCHED
-DEFINE_PER_CPU(int, nr_lat_sensitive);
-#endif
-
 void __init sched_init(void)
 {
 	unsigned long ptr = 0;
@@ -10078,10 +10049,6 @@ void __init sched_init(void)
 #endif /* CONFIG_SMP */
 		hrtick_rq_init(rq);
 		atomic_set(&rq->nr_iowait, 0);
-
-#ifdef CONFIG_ECHO_SCHED
-		per_cpu(nr_lat_sensitive, i) = 0;
-#endif
 
 #ifdef CONFIG_SCHED_CORE
 		rq->core = rq;
