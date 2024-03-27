@@ -4719,6 +4719,15 @@ static struct ctl_table sched_core_sysctls[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+	{
+		.procname	= "sched_echo_powersave",
+		.data		= &echo_powersave,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_THREE,
+	},
 #endif
 #ifdef CONFIG_SCHEDSTATS
 	{

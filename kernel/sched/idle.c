@@ -239,6 +239,9 @@ static void do_idle(void)
 	int cpu = smp_processor_id();
 #ifdef CONFIG_ECHO_SCHED
 	int pm_disabled = per_cpu(nr_lat_sensitive, cpu);
+
+	if (IS_PWR_SAVE_ENABLED)
+		pm_disabled = 0;
 #endif
 	/*
 	 * Check if we need to update blocked load

@@ -8,6 +8,308 @@ balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	return newidle_balance(rq, rf) != 0;
 }
 
+struct energy_env {
+	unsigned long task_busy_time;
+	unsigned long pd_busy_time;
+	unsigned long cpu_cap;
+	unsigned long pd_cap;
+};
+
+static DEFINE_PER_CPU(cpumask_var_t, select_rq_mask);
+
+static inline unsigned long
+eenv_pd_max_util(struct energy_env *eenv, struct cpumask *pd_cpus,
+		 struct task_struct *p, int dst_cpu)
+{
+	unsigned long max_util = 0;
+	int cpu;
+
+	for_each_cpu(cpu, pd_cpus) {
+		struct task_struct *tsk = (cpu == dst_cpu) ? p : NULL;
+		unsigned long util = cpu_util(cpu, p, dst_cpu, 1);
+		unsigned long eff_util, min, max;
+
+		/*
+		 * Performance domain frequency: utilization clamping
+		 * must be considered since it affects the selection
+		 * of the performance domain frequency.
+		 * NOTE: in case RT tasks are running, by default the
+		 * FREQUENCY_UTIL's utilization can be max OPP.
+		 */
+		eff_util = effective_cpu_util(cpu, util, &min, &max);
+
+		/* Task's uclamp can modify min and max value */
+		if (tsk && uclamp_is_used()) {
+			min = max(min, uclamp_eff_value(p, UCLAMP_MIN));
+
+			/*
+			 * If there is no active max uclamp constraint,
+			 * directly use task's one, otherwise keep max.
+			 */
+			if (uclamp_rq_is_idle(cpu_rq(cpu)))
+				max = uclamp_eff_value(p, UCLAMP_MAX);
+			else
+				max = max(max, uclamp_eff_value(p, UCLAMP_MAX));
+		}
+
+		eff_util = sugov_effective_cpu_perf(cpu, eff_util, min, max);
+		max_util = max(max_util, eff_util);
+	}
+
+	return min(max_util, eenv->cpu_cap);
+}
+
+static inline unsigned long
+compute_energy(struct energy_env *eenv, struct perf_domain *pd,
+	       struct cpumask *pd_cpus, struct task_struct *p, int dst_cpu)
+{
+	unsigned long max_util = eenv_pd_max_util(eenv, pd_cpus, p, dst_cpu);
+	unsigned long busy_time = eenv->pd_busy_time;
+	unsigned long energy;
+
+	if (dst_cpu >= 0)
+		busy_time = min(eenv->pd_cap, busy_time + eenv->task_busy_time);
+
+	energy = em_cpu_energy(pd->em_pd, max_util, busy_time, eenv->cpu_cap);
+
+	trace_sched_compute_energy_tp(p, dst_cpu, energy, max_util, busy_time);
+
+	return energy;
+}
+
+static inline void eenv_pd_busy_time(struct energy_env *eenv,
+				     struct cpumask *pd_cpus,
+				     struct task_struct *p)
+{
+	unsigned long busy_time = 0;
+	int cpu;
+
+	for_each_cpu(cpu, pd_cpus) {
+		unsigned long util = cpu_util(cpu, p, -1, 0);
+
+		busy_time += effective_cpu_util(cpu, util, NULL, NULL);
+	}
+
+	eenv->pd_busy_time = min(eenv->pd_cap, busy_time);
+}
+
+static inline void eenv_task_busy_time(struct energy_env *eenv,
+				       struct task_struct *p, int prev_cpu)
+{
+	unsigned long busy_time, max_cap = arch_scale_cpu_capacity(prev_cpu);
+	unsigned long irq = cpu_util_irq(cpu_rq(prev_cpu));
+
+	if (unlikely(irq >= max_cap))
+		busy_time = max_cap;
+	else
+		busy_time = scale_irq_capacity(task_util_est(p), irq, max_cap);
+
+	eenv->task_busy_time = busy_time;
+}
+
+static inline u64 cfs_rq_last_update_time(struct cfs_rq *cfs_rq)
+{
+	return u64_u32_load_copy(cfs_rq->avg.last_update_time,
+				 cfs_rq->last_update_time_copy);
+}
+
+static void sync_entity_load_avg(struct sched_entity *se)
+{
+	struct cfs_rq *cfs_rq = cfs_rq_of(se);
+	u64 last_update_time;
+
+	last_update_time = cfs_rq_last_update_time(cfs_rq);
+	__update_load_avg_blocked_se(last_update_time, se);
+}
+
+static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu)
+{
+	struct cpumask *cpus = this_cpu_cpumask_var_ptr(select_rq_mask);
+	unsigned long prev_delta = ULONG_MAX, best_delta = ULONG_MAX;
+	unsigned long p_util_min = uclamp_is_used() ? uclamp_eff_value(p, UCLAMP_MIN) : 0;
+	unsigned long p_util_max = uclamp_is_used() ? uclamp_eff_value(p, UCLAMP_MAX) : 1024;
+	struct root_domain *rd = this_rq()->rd;
+	int cpu, best_energy_cpu, target = -1;
+	int prev_fits = -1, best_fits = -1;
+	unsigned long best_thermal_cap = 0;
+	unsigned long prev_thermal_cap = 0;
+	struct sched_domain *sd;
+	struct perf_domain *pd;
+	struct energy_env eenv;
+
+	rcu_read_lock();
+	pd = rcu_dereference(rd->pd);
+	if (!pd || READ_ONCE(rd->overutilized))
+		goto unlock;
+
+	/*
+	 * Energy-aware wake-up happens on the lowest sched_domain starting
+	 * from sd_asym_cpucapacity spanning over this_cpu and prev_cpu.
+	 */
+	sd = rcu_dereference(*this_cpu_ptr(&sd_asym_cpucapacity));
+	while (sd && !cpumask_test_cpu(prev_cpu, sched_domain_span(sd)))
+		sd = sd->parent;
+	if (!sd)
+		goto unlock;
+
+	target = prev_cpu;
+
+	sync_entity_load_avg(&p->se);
+	if (!task_util_est(p) && p_util_min == 0)
+		goto unlock;
+
+	eenv_task_busy_time(&eenv, p, prev_cpu);
+
+	for (; pd; pd = pd->next) {
+		unsigned long util_min = p_util_min, util_max = p_util_max;
+		unsigned long cpu_cap, cpu_thermal_cap, util;
+		long prev_spare_cap = -1, max_spare_cap = -1;
+		unsigned long rq_util_min, rq_util_max;
+		unsigned long cur_delta, base_energy;
+		int max_spare_cap_cpu = -1;
+		int fits, max_fits = -1;
+
+		cpumask_and(cpus, perf_domain_span(pd), cpu_online_mask);
+
+		if (cpumask_empty(cpus))
+			continue;
+
+		/* Account thermal pressure for the energy estimation */
+		cpu = cpumask_first(cpus);
+		cpu_thermal_cap = arch_scale_cpu_capacity(cpu);
+		cpu_thermal_cap -= arch_scale_thermal_pressure(cpu);
+
+		eenv.cpu_cap = cpu_thermal_cap;
+		eenv.pd_cap = 0;
+
+		for_each_cpu(cpu, cpus) {
+			struct rq *rq = cpu_rq(cpu);
+
+			eenv.pd_cap += cpu_thermal_cap;
+
+			if (!cpumask_test_cpu(cpu, sched_domain_span(sd)))
+				continue;
+
+			if (!cpumask_test_cpu(cpu, p->cpus_ptr))
+				continue;
+
+			util = cpu_util(cpu, p, cpu, 0);
+			cpu_cap = capacity_of(cpu);
+
+			/*
+			 * Skip CPUs that cannot satisfy the capacity request.
+			 * IOW, placing the task there would make the CPU
+			 * overutilized. Take uclamp into account to see how
+			 * much capacity we can get out of the CPU; this is
+			 * aligned with sched_cpu_util().
+			 */
+			if (uclamp_is_used() && !uclamp_rq_is_idle(rq)) {
+				/*
+				 * Open code uclamp_rq_util_with() except for
+				 * the clamp() part. Ie: apply max aggregation
+				 * only. util_fits_cpu() logic requires to
+				 * operate on non clamped util but must use the
+				 * max-aggregated uclamp_{min, max}.
+				 */
+				rq_util_min = uclamp_rq_get(rq, UCLAMP_MIN);
+				rq_util_max = uclamp_rq_get(rq, UCLAMP_MAX);
+
+				util_min = max(rq_util_min, p_util_min);
+				util_max = max(rq_util_max, p_util_max);
+			}
+
+			fits = util_fits_cpu(util, util_min, util_max, cpu);
+			if (!fits)
+				continue;
+
+			lsub_positive(&cpu_cap, util);
+
+			if (cpu == prev_cpu) {
+				/* Always use prev_cpu as a candidate. */
+				prev_spare_cap = cpu_cap;
+				prev_fits = fits;
+			} else if ((fits > max_fits) ||
+				   ((fits == max_fits) && ((long)cpu_cap > max_spare_cap))) {
+				/*
+				 * Find the CPU with the maximum spare capacity
+				 * among the remaining CPUs in the performance
+				 * domain.
+				 */
+				max_spare_cap = cpu_cap;
+				max_spare_cap_cpu = cpu;
+				max_fits = fits;
+			}
+		}
+
+		if (max_spare_cap_cpu < 0 && prev_spare_cap < 0)
+			continue;
+
+		eenv_pd_busy_time(&eenv, cpus, p);
+		/* Compute the 'base' energy of the pd, without @p */
+		base_energy = compute_energy(&eenv, pd, cpus, p, -1);
+
+		/* Evaluate the energy impact of using prev_cpu. */
+		if (prev_spare_cap > -1) {
+			prev_delta = compute_energy(&eenv, pd, cpus, p,
+						    prev_cpu);
+			/* CPU utilization has changed */
+			if (prev_delta < base_energy)
+				goto unlock;
+			prev_delta -= base_energy;
+			prev_thermal_cap = cpu_thermal_cap;
+			best_delta = min(best_delta, prev_delta);
+		}
+
+		/* Evaluate the energy impact of using max_spare_cap_cpu. */
+		if (max_spare_cap_cpu >= 0 && max_spare_cap > prev_spare_cap) {
+			/* Current best energy cpu fits better */
+			if (max_fits < best_fits)
+				continue;
+
+			/*
+			 * Both don't fit performance hint (i.e. uclamp_min)
+			 * but best energy cpu has better capacity.
+			 */
+			if ((max_fits < 0) &&
+			    (cpu_thermal_cap <= best_thermal_cap))
+				continue;
+
+			cur_delta = compute_energy(&eenv, pd, cpus, p,
+						   max_spare_cap_cpu);
+			/* CPU utilization has changed */
+			if (cur_delta < base_energy)
+				goto unlock;
+			cur_delta -= base_energy;
+
+			/*
+			 * Both fit for the task but best energy cpu has lower
+			 * energy impact.
+			 */
+			if ((max_fits > 0) && (best_fits > 0) &&
+			    (cur_delta >= best_delta))
+				continue;
+
+			best_delta = cur_delta;
+			best_energy_cpu = max_spare_cap_cpu;
+			best_fits = max_fits;
+			best_thermal_cap = cpu_thermal_cap;
+		}
+	}
+	rcu_read_unlock();
+
+	if ((best_fits > prev_fits) ||
+	    ((best_fits > 0) && (best_delta < prev_delta)) ||
+	    ((best_fits < 0) && (best_thermal_cap > prev_thermal_cap)))
+		target = best_energy_cpu;
+
+	return target;
+
+unlock:
+	rcu_read_unlock();
+
+	return target;
+}
+
 static int
 wake_affine_idle(int this_cpu, int prev_cpu, int sync)
 {
@@ -90,12 +392,19 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 	unsigned int min = rq->nr_running;
 	int this_cpu = smp_processor_id();
 
-	if (wake_flags & WF_TTWU) {
+	if (IS_PWR_SAVE_ENABLED || (wake_flags & WF_TTWU)) {
 		record_wakee(p);
 
 		if ((wake_flags & WF_CURRENT_CPU) &&
 		    cpumask_test_cpu(cpu, p->cpus_ptr))
 			return cpu;
+
+		if (IS_PWR_SAVE_ENABLED || sched_energy_enabled()) {
+			new_cpu = find_energy_efficient_cpu(p, prev_cpu);
+			if (new_cpu >= 0)
+				return new_cpu;
+			new_cpu = prev_cpu;
+		}
 
 		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, p->cpus_ptr);
 	}
@@ -382,6 +691,64 @@ static inline int migrate_degrades_locality(struct task_struct *p, struct rq *ds
 }
 #endif
 
+static int
+can_migrate_task_powersave(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
+{
+	int tsk_cache_hot;
+
+	/* Disregard pcpu kthreads; they are where they need to be. */
+	if (kthread_is_per_cpu(p))
+		return 0;
+
+	if (!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr))
+		return 0;
+
+	if (task_on_cpu(src_rq, p))
+		return 0;
+
+	tsk_cache_hot = migrate_degrades_locality(p, dst_rq, src_rq);
+	if (tsk_cache_hot > 0)
+		return 0;
+
+	return 1;
+}
+
+static int move_task_powersave(struct rq *dist_rq, struct rq *src_rq,
+			struct rq_flags *src_rf)
+{
+	struct cfs_rq *src_cfs_rq = &src_rq->cfs;
+	struct task_struct *p;
+	struct bs_node *bsn = src_cfs_rq->head;
+	struct lb_env env = {
+		.dst_cpu	= cpu_of(dist_rq),
+		.dst_rq		= dist_rq,
+		.src_cpu	= cpu_of(src_rq),
+		.src_rq		= src_rq,
+		.src_rf		= src_rf,
+		.idle		= dist_rq->idle_balance ? CPU_IDLE : CPU_NOT_IDLE,
+	};
+
+	while (bsn) {
+		p = task_of(se_of(bsn));
+		if (can_migrate_task_powersave(p, dist_rq, src_rq)) {
+			pull_from(p, &env);
+			return 1;
+		}
+
+		bsn = bsn->next;
+	}
+
+	/*
+	 * Here we know we have not migrated any task,
+	 * thus, we need to unlock and return 0
+	 * Note: the pull_from does the unlocking for us.
+	 */
+	rq_unlock(src_rq, src_rf);
+	local_irq_restore(src_rf->flags);
+
+	return 0;
+}
+
 #define MIN_HOTNESS 0x7FFFFFFFFFFFFFFLL
 
 static s64 task_hotness(struct task_struct *p, struct rq *dst_rq, struct rq *src_rq)
@@ -559,6 +926,9 @@ static void idle_balance(struct rq *this_rq)
 	unsigned int max = 0;
 	struct rq_flags src_rf;
 
+	if (IS_PWR_SAVE_ENABLED)
+		return;
+
 	if (idle_pull_global_candidate(this_rq))
 		return;
 
@@ -727,7 +1097,7 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 	/*
 	 * Do not pull tasks towards !active CPUs...
 	 */
-	if (!cpu_active(this_cpu))
+	if (IS_PWR_SAVE_ENABLED || !cpu_active(this_cpu))
 		return 0;
 
 	rq_unpin_lock(this_rq, rf);
@@ -849,7 +1219,9 @@ again:
 		return;
 	}
 
-	if(move_task(min_rq, max_rq, &src_rf))
+	if (IS_PWR_SAVE_ENABLED && idle_cpu(cpu_of(min_rq)) && max - min == 2)
+		move_task_powersave(min_rq, max_rq, &src_rf);
+	else if(move_task(min_rq, max_rq, &src_rf))
 		goto again;
 }
 

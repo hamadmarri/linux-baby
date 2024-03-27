@@ -88,6 +88,10 @@
 # define SCHED_WARN_ON(x)      ({ (void)(x), 0; })
 #endif
 
+#ifdef CONFIG_ECHO_SCHED
+#define IS_PWR_SAVE_ENABLED (echo_powersave == 1)
+#endif
+
 struct rq;
 struct cpuidle_state;
 
@@ -111,6 +115,7 @@ extern int sched_rr_timeslice;
 
 #ifdef CONFIG_ECHO_SCHED
 extern unsigned int bs_shared_quota;
+extern unsigned int echo_powersave;
 #endif
 
 /*

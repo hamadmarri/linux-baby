@@ -17,6 +17,7 @@
 unsigned int sysctl_sched_base_slice	= 7000ULL;
 unsigned int bs_shared_quota		= 105000ULL; // 105us
 u32 alpha				= 500U;
+unsigned int __read_mostly echo_powersave = 0;
 
 struct lb_env {
 	struct rq		*src_rq;
