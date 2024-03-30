@@ -9928,7 +9928,7 @@ void __init sched_init(void)
 	wait_bit_init();
 
 #ifdef CONFIG_ECHO_SCHED
-	printk(KERN_INFO "ECHO CPU scheduler v6.7 by Hamad Al Marri.");
+	printk(KERN_INFO "ECHO CPU scheduler v6.8 by Hamad Al Marri.");
 #endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
