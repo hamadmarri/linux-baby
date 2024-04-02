@@ -14,8 +14,8 @@
 #include "sched.h"
 #include "pelt.h"
 
-unsigned int sysctl_sched_base_slice	= 7000ULL;
-unsigned int bs_shared_quota		= 105000ULL; // 105us
+unsigned int sysctl_sched_base_slice	= 50ULL;
+unsigned int bs_shared_quota		= 500ULL; // 500ns
 u32 alpha				= 500U;
 
 struct lb_env {
