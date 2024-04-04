@@ -14,7 +14,7 @@
 #include "sched.h"
 #include "pelt.h"
 
-unsigned int sysctl_sched_base_slice	= 6000ULL;
+unsigned int sysctl_sched_base_slice	= 4200ULL;
 unsigned int bs_shared_quota		= 35000ULL; // 35us
 u32 alpha				= 500U;
 
