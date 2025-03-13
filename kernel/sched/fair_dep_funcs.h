@@ -458,7 +458,7 @@ static inline u64 calc_delta_fair(u64 delta, struct sched_entity *se)
 	return delta;
 }
 
-static void update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static bool update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	unsigned int n = cfs_rq->nr_running;
 
@@ -466,6 +466,8 @@ static void update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		se->slice = bs_shared_quota;
 	else
 		se->slice = max(bs_shared_quota / n, sysctl_sched_base_slice);
+
+	return true;
 }
 
 #ifdef CONFIG_SCHED_HRTICK
