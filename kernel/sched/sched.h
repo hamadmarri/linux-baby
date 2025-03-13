@@ -115,6 +115,10 @@ extern int sysctl_sched_rt_period;
 extern int sysctl_sched_rt_runtime;
 extern int sched_rr_timeslice;
 
+#ifdef CONFIG_ECHO_SCHED
+extern unsigned int bs_shared_quota;
+#endif
+
 /*
  * Asymmetric CPU capacity bits
  */
@@ -655,7 +659,9 @@ struct cfs_rq {
 	unsigned int		idle_nr_running;   /* SCHED_IDLE */
 	unsigned int		idle_h_nr_running; /* SCHED_IDLE */
 	unsigned int		h_nr_delayed;
-
+#ifdef CONFIG_ECHO_SCHED
+	u64			local_cand_est;
+#endif
 	s64			avg_vruntime;
 	u64			avg_load;
 
@@ -672,6 +678,10 @@ struct cfs_rq {
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
 	struct sched_entity	*curr;
+#ifdef CONFIG_ECHO_SCHED
+	struct bs_node		*head;
+	struct bs_node		*q2_head;
+#endif
 	struct sched_entity	*next;
 
 #ifdef CONFIG_SMP

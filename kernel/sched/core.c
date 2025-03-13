@@ -4440,6 +4440,12 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.nr_migrations		= 0;
 	p->se.vruntime			= 0;
 	p->se.vlag			= 0;
+
+#ifdef CONFIG_ECHO_SCHED
+	p->se.bs_node.vburst		= 0;
+	p->se.bs_node.est		= 0;
+#endif
+
 	INIT_LIST_HEAD(&p->se.group_node);
 
 	/* A delayed task cannot be in clone(). */
@@ -4609,6 +4615,15 @@ static int sysctl_schedstats(const struct ctl_table *table, int write, void *buf
 
 #ifdef CONFIG_SYSCTL
 static struct ctl_table sched_core_sysctls[] = {
+#ifdef CONFIG_ECHO_SCHED
+	{
+		.procname	= "sched_bs_shared_quota",
+		.data		= &bs_shared_quota,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+#endif
 #ifdef CONFIG_SCHEDSTATS
 	{
 		.procname       = "sched_schedstats",
@@ -8393,6 +8408,10 @@ void __init sched_init(void)
 #endif
 
 	wait_bit_init();
+
+#ifdef CONFIG_ECHO_SCHED
+	printk(KERN_INFO "ECHO CPU scheduler v6.12 by Hamad Al Marri.");
+#endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	ptr += 2 * nr_cpu_ids * sizeof(void **);
