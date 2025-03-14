@@ -2,7 +2,7 @@
 static int
 balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
-	if (rq->nr_running)
+	if (sched_fair_runnable(rq))
 		return 1;
 
 	return newidle_balance(rq, rf) != 0;

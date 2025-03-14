@@ -76,7 +76,7 @@ static void _nohz_idle_balance(struct rq *this_rq, unsigned int flags)
 		 * work being done for other CPUs. Next load
 		 * balancing owner will pick it up.
 		 */
-		if (need_resched()) {
+		if (!idle_cpu(this_cpu) && need_resched()) {
 			if (flags & NOHZ_STATS_KICK)
 				has_blocked_load = true;
 			if (flags & NOHZ_NEXT_KICK)
@@ -350,6 +350,13 @@ static void kick_ilb(unsigned int flags)
 		return;
 
 	/*
+	 * Don't bother if no new NOHZ balance work items for ilb_cpu,
+	 * i.e. all bits in flags are already set in ilb_cpu.
+	 */
+	if ((atomic_read(nohz_flags(ilb_cpu)) & flags) == flags)
+		return;
+
+	/*
 	 * Access to rq::nohz_csd is serialized by NOHZ_KICK_MASK; he who sets
 	 * the first flag owns it; cleared by nohz_csd_func().
 	 */
@@ -374,6 +381,9 @@ check_cpu_capacity(struct rq *rq, struct sched_domain *sd)
 
 static bool sched_use_asym_prio(struct sched_domain *sd, int cpu)
 {
+	if (!(sd->flags & SD_ASYM_PACKING))
+		return false;
+
 	if (!sched_smt_active())
 		return true;
 

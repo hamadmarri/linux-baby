@@ -264,6 +264,7 @@ static void switched_from_fair(struct rq *rq, struct task_struct *p) {}
 
 static void switched_to_fair(struct rq *rq, struct task_struct *p)
 {
+	set_task_max_allowed_capacity(p);
 	if (task_on_rq_queued(p)) {
 		/*
 		 * We were most likely switched from sched_rt, so
@@ -840,18 +841,21 @@ static inline int task_fits_cpu(struct task_struct *p, int cpu)
 	return (util_fits_cpu(util, uclamp_min, uclamp_max, cpu) > 0);
 }
 
-
 static inline void update_misfit_status(struct task_struct *p, struct rq *rq)
 {
+	int cpu = cpu_of(rq);
+
 	if (!sched_asym_cpucap_active())
 		return;
 
-	if (!p || p->nr_cpus_allowed == 1) {
-		rq->misfit_task_load = 0;
-		return;
-	}
+	/*
+	 * Affinity allows us to go somewhere higher?  Or are we on biggest
+	 * available CPU already? Or do we fit into this CPU ?
+	 */
+	if (!p || (p->nr_cpus_allowed == 1) ||
+	    (arch_scale_cpu_capacity(cpu) == p->max_allowed_capacity) ||
+	    task_fits_cpu(p, cpu)) {
 
-	if (task_fits_cpu(p, cpu_of(rq))) {
 		rq->misfit_task_load = 0;
 		return;
 	}
